@@ -43,6 +43,7 @@ from get_portfolio import (
     copy_to_clipboard,
     days_to_long_term,
     fetch_portfolio_block,
+    fetch_snps_quote,
     fmt_signed_money,
     fmt_signed_pct,
     format_portable_portfolio_text,
@@ -181,6 +182,8 @@ def format_manual_supplement(
     results: list[dict] | None,
     api_total: float,
     as_of: datetime,
+    quote: tuple[float, datetime] | None = None,
+    quote_error: Exception | None = None,
 ) -> tuple[str, dict]:
     """Render manual lots separately from API totals and return identity data."""
     if not manual:
@@ -194,6 +197,8 @@ def format_manual_supplement(
         "total_shares": manual["total_shares"],
         "price": None,
         "price_as_of": None,
+        "quote_price": None,
+        "quote_timestamp": None,
     }
     if _manual_is_api_covered(manual, results):
         identity["coverage"] = "api"
@@ -211,6 +216,15 @@ def format_manual_supplement(
         if (holding.get("symbol") or "").upper() == "SNPS" and (holding.get("price") or 0) > 0
     ]
     price = float(api_snps[0]["price"]) if api_snps else None
+    price_as_of = as_of if price is not None else None
+    quote_price = quote_timestamp = None
+    if price is None and quote is not None:
+        quote_price, quote_timestamp = quote
+        if quote_price > 0 and isinstance(quote_timestamp, datetime):
+            price = float(quote_price)
+            price_as_of = quote_timestamp
+        else:
+            quote_price = quote_timestamp = None
     rows = [
         "| Symbol | Acquired | Type | Shares | Estimated basis/share |",
         "|---|---|---|---:|---:|",
@@ -220,6 +234,16 @@ def format_manual_supplement(
         f"${lot['estimated_basis_per_share']:,.2f} unverified |"
         for lot in manual["lots"]
     )
+    quote_failure_reason = None
+    if quote_error is not None:
+        detail = " ".join(str(quote_error).split())
+        detail = re.sub(
+            r"(?i)\b(consumer[_ -]?(?:key|secret)|access[_ -]?token(?:[_ -]?secret)?|oauth[_ -]?token)\b\s*[:=]\s*[^,;\s]+",
+            r"\1=[redacted]",
+            detail,
+        )
+        detail = detail[:180]
+        quote_failure_reason = f"{type(quote_error).__name__}: {detail}" if detail else type(quote_error).__name__
     lines = [
         "**Manual SNPS stock-plan supplement** (outside API-covered accounts; not trade funding):",
         *rows,
@@ -232,15 +256,22 @@ def format_manual_supplement(
             "the API-covered holdings. Obtain a current quote with a date before drawing combined-portfolio "
             "conclusions. The historical reference quote in the supplement is not used."
         )
+        if quote_error is not None:
+            lines.append(f"- Quote lookup unavailable: {quote_failure_reason}.")
     else:
         manual_value = manual["total_shares"] * price
         api_snps_value = sum(h.get("market_value") or 0.0 for h in api_snps)
         combined_total = api_total + manual_value
         combined_snps = api_snps_value + manual_value
-        identity.update({"price": price, "price_as_of": as_of.isoformat()})
+        identity.update({
+            "price": price,
+            "price_as_of": price_as_of.isoformat(),
+            "quote_price": quote_price,
+            "quote_timestamp": quote_timestamp.isoformat() if quote_timestamp else None,
+        })
         lines.append(
-            f"- Price: **${price:,.2f}**, attributable to the API portfolio observed "
-            f"{as_of:%Y-%m-%d %H:%M %Z}. Manual value **{fmt_money(manual_value)}**."
+            f"- Price: **${price:,.2f}**, timestamped {price_as_of:%Y-%m-%d %H:%M %Z}. "
+            f"Manual value **{fmt_money(manual_value)}**."
         )
         lines.append(
             f"- API-covered total **{fmt_money(api_total)}**; combined total including the manual "
@@ -1055,12 +1086,27 @@ def build_briefing(
     as_of: datetime,
     portfolio_block: str,
     results=None,
+    live_build: bool = False,
 ) -> BriefingBuildResult:
     policy = active_policy()
     context, context_status = load_portfolio_context()
     manual = load_manual_holdings()
+    quote = None
+    quote_error = None
+    has_api_snps_price = any(
+        (holding.get("symbol") or "").upper() == "SNPS"
+        and (holding.get("price") or 0) > 0
+        for result in results or []
+        for holding in result.get("holdings") or []
+    )
+    if (live_build and manual and not _manual_is_api_covered(manual, results)
+            and not has_api_snps_price):
+        try:
+            quote = fetch_snps_quote()
+        except Exception as exc:
+            quote_error = exc
     manual_supplement_block, manual_identity = format_manual_supplement(
-        manual, results, grand_total, as_of
+        manual, results, grand_total, as_of, quote=quote, quote_error=quote_error
     )
     as_of_str = as_of.strftime("%Y-%m-%d %H:%M")
     direct_members = "+".join(policy.sleeves["direct_ai_semi"])
@@ -1401,6 +1447,7 @@ def main(argv=None) -> int:
 
 
 def _run(args, parser) -> int:
+    live_build = False
     if args.from_clipboard or args.input_file:
         if args.allow_partial:
             parser.error("--allow-partial is only available for live fetching")
@@ -1424,6 +1471,7 @@ def _run(args, parser) -> int:
             )
             return 3
     else:
+        live_build = True
         print("Fetching live E*TRADE portfolio...")
         formatted, grand_total, npos, results, as_of = fetch_portfolio_block(
             verbose=True, allow_partial=args.allow_partial
@@ -1435,7 +1483,8 @@ def _run(args, parser) -> int:
 
     holdings, accounts = consolidate(results, grand_total)
     result = build_briefing(
-        holdings, accounts, grand_total, as_of, formatted, results=results
+        holdings, accounts, grand_total, as_of, formatted, results=results,
+        live_build=live_build,
     )
     dated, latest = save_briefing_result(result, formatted, as_of)
 

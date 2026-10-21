@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from zoneinfo import ZoneInfo
 
 import build_briefing_prompt as briefing
@@ -107,6 +107,157 @@ class ManualSupplementTests(unittest.TestCase):
         self.assertIn("already covered", text.lower())
         self.assertEqual(identity["coverage"], "api")
         self.assertNotIn("$169,000", text)
+
+    def test_market_quote_read_uses_market_client_and_retry(self):
+        response = {"QuoteResponse": {"quoteData": [{
+            "dateTimeUTC": 1792593000,
+            "all": {"lastTrade": 501.25},
+        }]}}
+        market = Mock()
+        market.get_quote.return_value = response
+        with (patch.object(portfolio, "_credentials", return_value={
+                  "consumer_key": "key", "consumer_secret": "secret",
+                  "access_token": "token", "access_token_secret": "token-secret",
+                  "dev": False,
+              }),
+              patch.object(portfolio, "check_auth_date") as auth_check,
+              patch.object(portfolio.pyetrade, "ETradeMarket", return_value=market) as market_ctor,
+              patch.object(portfolio, "_retry_read", side_effect=lambda call: call()) as retry):
+            price, timestamp = portfolio.fetch_snps_quote()
+        market_ctor.assert_called_once_with("key", "secret", "token", "token-secret", dev=False)
+        auth_check.assert_called_once_with()
+        market.get_quote.assert_called_once_with(["SNPS"], resp_format="json")
+        retry.assert_called_once()
+        self.assertEqual(price, 501.25)
+        self.assertEqual(timestamp, datetime.fromtimestamp(1792593000, tz=ET))
+
+    def test_quote_parser_accepts_single_quote_data_and_rejects_invalid_values(self):
+        parsed = portfolio.parse_snps_quote({"QuoteResponse": {"quoteData": {
+            "dateTime": "2026-10-21T09:30:00-04:00",
+            "intraday": {"lastTrade": "501.25"},
+        }}})
+        self.assertEqual(parsed, (501.25, AS_OF))
+        legacy_time = datetime(2026, 10, 21, 15, 17, tzinfo=ET)
+        parsed = portfolio.parse_snps_quote({"QuoteResponse": {"quoteData": {
+            "dateTime": "15:17:00 EDT 10-21-2026",
+            "fundamental": {"lastTrade": 502},
+        }}})
+        self.assertEqual(parsed, (502.0, legacy_time))
+        for data in (
+            {"QuoteResponse": {"quoteData": {"dateTimeUTC": 1792593000,
+                                                "all": {"lastTrade": 0}}}},
+            {"QuoteResponse": {"quoteData": {"dateTime": "bad-date",
+                                                "fundamental": {"lastTrade": 501}}}},
+            {"QuoteResponse": {"quoteData": {"dateTime": "2026-10-21",
+                                                "all": {"lastTrade": 501}}}},
+            {"QuoteResponse": {"quoteData": {"all": {"lastTrade": 501}}}},
+        ):
+            with self.assertRaises(portfolio.PortfolioDataError):
+                portfolio.parse_snps_quote(data)
+
+    def _build_with_quote(self, results=None, quote_result=None, quote_error=None,
+                          live_build=True):
+        holdings = [holding("CASH", 1000, 1) | {"weight": 100}]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            patches = [
+                patch.object(briefing, "BRIEFINGS_DIR", root / "briefings"),
+                patch.object(briefing, "OUT_DIR", root / "prompts"),
+                patch.object(briefing, "load_manual_holdings", return_value={
+                    "lots": [{"symbol": "SNPS", "acquired": "2024-01-01",
+                              "benefit_type": "ESPP", "shares": 169,
+                              "estimated_basis_per_share": 300}],
+                    "total_shares": 169,
+                }),
+            ]
+            with patches[0], patches[1], patches[2], \
+                 patch.object(briefing, "fetch_snps_quote", return_value=quote_result,
+                              side_effect=quote_error) as fetch_quote:
+                result = briefing.build_briefing(
+                    holdings, [], 1000, AS_OF, "",
+                    results=results or api_results(holding("CASH", 1000, 1)),
+                    live_build=live_build,
+                )
+        return result, fetch_quote
+
+    def test_live_quote_updates_combined_totals_weight_and_identity_timestamp(self):
+        quote_time = datetime(2026, 10, 21, 9, 15, tzinfo=ET)
+        result, fetch_quote = self._build_with_quote(quote_result=(500, quote_time))
+        fetch_quote.assert_called_once_with()
+        self.assertIn("$84,500", result.prompt)
+        self.assertIn("$85,500", result.prompt)
+        self.assertIn("98.8%", result.prompt)
+        self.assertIn("2026-10-21 09:15 EDT", result.prompt)
+        self.assertEqual(result.meta["manual_supplement"]["price"], 500)
+        self.assertEqual(result.meta["manual_supplement"]["price_as_of"], quote_time.isoformat())
+        self.assertEqual(result.meta["manual_supplement"]["quote_price"], 500)
+        self.assertEqual(
+            result.meta["manual_supplement"]["quote_timestamp"], quote_time.isoformat()
+        )
+        changed_result, _ = self._build_with_quote(
+            quote_result=(501, datetime(2026, 10, 21, 9, 16, tzinfo=ET)),
+        )
+        self.assertNotEqual(result.meta["briefing_id"], changed_result.meta["briefing_id"])
+
+    def test_quote_failure_is_nonfatal_and_keeps_exposure_incomplete_with_reason(self):
+        result, fetch_quote = self._build_with_quote(
+            quote_error=portfolio.AuthExpiredError("expired token"),
+        )
+        fetch_quote.assert_called_once_with()
+        self.assertIn("combined valuation/exposure incomplete", result.prompt.lower())
+        self.assertIn("expired token", result.prompt.lower())
+        self.assertIn("AuthExpiredError", result.prompt)
+        self.assertEqual(result.meta["manual_supplement"]["coverage"], "manual")
+
+    def test_api_price_precedes_quote_and_offline_build_skips_quote(self):
+        results = api_results(holding("SNPS", 10, 500), holding("CASH", 1000, 1))
+        api_result, fetch_quote = self._build_with_quote(results=results)
+        fetch_quote.assert_not_called()
+        self.assertEqual(api_result.meta["manual_supplement"]["price"], 500)
+        self.assertEqual(api_result.meta["manual_supplement"]["price_as_of"], AS_OF.isoformat())
+
+        covered = api_results(holding(
+            "SNPS", 169, 500,
+            [{"qty": 169, "acquired": datetime(2024, 1, 1, tzinfo=ET)}],
+        ))
+        covered_result, fetch_quote = self._build_with_quote(results=covered)
+        fetch_quote.assert_not_called()
+        self.assertEqual(covered_result.meta["manual_supplement"]["coverage"], "api")
+
+        offline_result, fetch_quote = self._build_with_quote(
+            quote_result=(500, AS_OF), live_build=False,
+        )
+        fetch_quote.assert_not_called()
+        self.assertIsNone(offline_result.meta["manual_supplement"]["price"])
+
+    def test_offline_input_file_run_does_not_fetch_quote_or_live_portfolio(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            input_file = root / "portfolio.txt"
+            input_file.write_text("portable", encoding="utf-8")
+            args = type("Args", (), {
+                "from_clipboard": False,
+                "input_file": str(input_file),
+                "allow_partial": False,
+                "allow_stale": False,
+                "policy": None,
+            })()
+            parser = briefing.ArgumentParser()
+            with (patch.object(briefing, "BRIEFINGS_DIR", root / "briefings"),
+                  patch.object(briefing, "OUT_DIR", root / "prompts"),
+                  patch.object(portfolio, "PROJECT_ROOT", root),
+                  patch.object(briefing, "parse_portable_portfolio_text", return_value=(
+                      "portable", 1000, 1, api_results(holding("CASH", 1000, 1)), AS_OF,
+                  )),
+                  patch.object(briefing, "now_et", return_value=AS_OF),
+                  patch.object(briefing, "fetch_snps_quote") as fetch_quote,
+                  patch.object(briefing, "fetch_portfolio_block") as fetch_portfolio,
+                  patch.object(briefing, "save_briefing_result",
+                               return_value=(root / "dated", root / "latest")),
+                  patch.object(briefing, "copy_to_clipboard", return_value=False)):
+                self.assertEqual(briefing._run(args, parser), 0)
+            fetch_quote.assert_not_called()
+            fetch_portfolio.assert_not_called()
 
 
 class FundingTests(unittest.TestCase):
