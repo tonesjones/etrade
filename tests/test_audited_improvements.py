@@ -328,16 +328,19 @@ class ContinuityAndCadenceTests(unittest.TestCase):
         observations = {"positions": [], "reviews": []}
         recent = {"candidate_review_history": [{"completed_at": "2026-10-18"}]}
         old = {"candidate_review_history": [{"completed_at": "2026-10-13"}]}
-        policy = briefing.briefing_output_policy(
-            [], [], [], base | {"as_of": AS_OF.isoformat(), "date": "2026-10-21"},
-            base, observations, observations, AS_OF, recent
-        )
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+            briefing, "BRIEFINGS_DIR", Path(directory)
+        ):
+            policy = briefing.briefing_output_policy(
+                [], [], [], base | {"as_of": AS_OF.isoformat(), "date": "2026-10-21"},
+                base, observations, observations, AS_OF, recent
+            )
+            old_policy = briefing.briefing_output_policy(
+                [], [], [], base | {"as_of": AS_OF.isoformat(), "date": "2026-10-21"},
+                base, observations, observations, AS_OF, old
+            )
         self.assertFalse(policy.refresh_candidates)
-        policy = briefing.briefing_output_policy(
-            [], [], [], base | {"as_of": AS_OF.isoformat(), "date": "2026-10-21"},
-            base, observations, observations, AS_OF, old
-        )
-        self.assertTrue(policy.refresh_candidates)
+        self.assertTrue(old_policy.refresh_candidates)
 
     def test_quiet_daily_builds_refresh_on_day_one_and_day_eight(self):
         base = briefing.snapshot_dict(

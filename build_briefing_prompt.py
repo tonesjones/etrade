@@ -203,7 +203,8 @@ def format_manual_supplement(
     if _manual_is_api_covered(manual, results):
         identity["coverage"] = "api"
         return (
-            "**Manual stock-plan supplement:** the 169 SNPS shares appear already covered by "
+            "**Manual stock-plan supplement:** the "
+            f"{fmt_qty(manual['total_shares'])} SNPS shares appear already covered by "
             "an API holding with the same total quantity, so they are not added again. Broker "
             "reconciliation remains limited to API-covered accounts.",
             identity,
@@ -866,7 +867,7 @@ def briefing_output_policy(
     days_since_request = (as_of.date() - last_requested).days if last_requested else None
     # Keep same-day rebuilds useful: each saved briefing that requests a refresh
     # still carries the request, while its date remains the cadence anchor.
-    weekly_due = last_requested is None or days_since_request in (0,) or days_since_request >= 7
+    weekly_due = last_requested is None or days_since_request == 0 or days_since_request >= 7
     refresh_candidates = first_run or weekly_due or decision_day
     required = must_analyze_holdings(
         holdings, {row["symbol"] for row in harvest_reviews}

@@ -14,7 +14,7 @@ This module only uses read-only pyetrade APIs:
   - get_account_balance
   - get portfolio tax lots
   - get_quote for the manual SNPS valuation supplement
-It never imports or constructs ETradeOrder / market order helpers.
+It never imports or constructs ETradeOrder or another order client.
 No preview, place, cancel, or change-order calls exist in this repo.
 """
 
@@ -977,7 +977,7 @@ def check_auth_date(today: datetime | None = None) -> None:
 
 
 def get_accounts_api():
-    """Return a READ-ONLY accounts client (list + portfolio only)."""
+    """Return the READ-ONLY accounts client."""
     c = _credentials()
     check_auth_date()
     client = pyetrade.ETradeAccounts(
