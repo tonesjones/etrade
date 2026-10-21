@@ -23,6 +23,7 @@ class PartialReportCliTests(unittest.TestCase):
     def test_cash_includes_reported_margin_debit(self):
         balance = {"BalanceResponse": {
             "Cash": {"moneyMktBalance": 1155.08},
+            "accountType": "MARGIN",
             "Computed": {"cashBalance": 0, "marginBalance": -1082.939777,
                          "netCash": 484055.529223},
         }}
@@ -270,6 +271,13 @@ class LiveFetchWiringTests(unittest.TestCase):
                     "PositionLot": [{"remainingQty": 10, "marketValue": 1000.0, "termCode": 1}]}
         _text, total, *_ = self._fetch(position, 1000.0)
         self.assertEqual(total, 1000.0)
+
+    def test_live_fetch_passes_selected_account_type_to_cash_parser(self):
+        position = {**_position("AMD", qty=10, value=1000.0),
+                    "PositionLot": [{"remainingQty": 10, "marketValue": 1000.0, "termCode": 1}]}
+        with patch("get_portfolio.parse_account_cash", return_value=0.0) as parse_cash:
+            self._fetch(position, 1000.0)
+        self.assertEqual(parse_cash.call_args.kwargs["account_type"], "INDIVIDUAL")
 
     def test_lot_mismatch_stops_the_run(self):
         position = {**_position("AMD", qty=10, value=1000.0),

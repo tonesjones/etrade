@@ -1116,13 +1116,29 @@ def _direct_numeric(value, *keys) -> float | None:
     return _as_float(_first(value, *keys))
 
 
-def parse_account_cash(resp: dict) -> float | None:
-    """Cash plus sweep and signed margin balance, or None if absent."""
+def parse_account_cash(resp: dict, account_type: str | None = None) -> float | None:
+    """Cash plus sweep and a guarded margin debit, or None if absent."""
     if not isinstance(resp, dict) or "BalanceResponse" not in resp:
         return None
     balance = resp["BalanceResponse"]
     computed = _first(balance, "Computed", "computed") or {}
     cash_obj = _first(balance, "Cash", "cash") or {}
+
+    # https://apisb.etrade.com/docs/api/account/api-balance-v1.html documents
+    # marginBalance but does not document its sign convention. Treat only a
+    # negative value as a debit, and only when the account indicates margin.
+    indicators = (
+        account_type,
+        _first(balance, "accountType"),
+        _first(balance, "accountMode"),
+    )
+    margin_account = any("MARGIN" in str(value).upper() for value in indicators if value)
+    margin_account = margin_account or _first(balance, "Margin") is not None
+    margin_balance = _direct_numeric(computed, "marginBalance")
+    if margin_balance is not None and margin_balance > 0:
+        LOGGER.warning("Ignoring positive marginBalance; its sign is not documented as a debit.")
+    elif margin_balance is not None and margin_balance < 0 and not margin_account:
+        LOGGER.warning("Ignoring negative marginBalance without a margin-account indicator.")
 
     cash_balance = _direct_numeric(computed, "cashBalance")
     if cash_balance is None:
@@ -1131,9 +1147,12 @@ def parse_account_cash(resp: dict) -> float | None:
     if mmkt is None:
         mmkt = _direct_numeric(cash_obj, "moneyMktBalance")
     if cash_balance is not None or mmkt is not None:
-        # The sweep alone overstates equity when a reported margin debit offsets it.
-        margin_balance = _direct_numeric(computed, "marginBalance")
-        return (cash_balance or 0.0) + (mmkt or 0.0) + (margin_balance or 0.0)
+        debit = (
+            margin_balance
+            if margin_account and margin_balance is not None and margin_balance < 0
+            else 0.0
+        )
+        return (cash_balance or 0.0) + (mmkt or 0.0) + debit
 
     net_cash = _direct_numeric(computed, "netCash")
     if net_cash is None:
@@ -1535,7 +1554,9 @@ def fetch_portfolio_block(verbose: bool = True, allow_partial: bool = False):
                 holdings,
                 account_total=total,
                 position_total=position_total,
-                cash_from_balance=parse_account_cash(balance_raw),
+                cash_from_balance=parse_account_cash(
+                    balance_raw, account_type=a.get("accountType") or ""
+                ),
             )
             reconcile_account(label, holdings, total, source="Live portfolio")
             results.append({
