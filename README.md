@@ -41,6 +41,14 @@ The scripts pull every active account by default. To pull one account only, set 
 
 ## Daily workflow
 
+To run steps 1 and 2 with one command, run:
+
+```powershell
+.\daily.cmd
+```
+
+`daily.cmd` runs `etrade_auth.py` only when today's Eastern-date token is missing. It then builds the live prompt and copies it to the clipboard. If authorization or the build fails, it stops and leaves the clipboard unchanged.
+
 ### 1. Re-authorize after midnight Eastern
 
 E\*TRADE access tokens expire at midnight US Eastern. This is an E\*TRADE rule, and the project can't work around it. Your consumer key and secret stay in `.env`. Only the access token pair needs refreshing.
@@ -93,11 +101,13 @@ The importer checks the reply against the exact portfolio data that the prompt w
 - The reply answers every focus name.
 - Every ticker and account exists.
 - Each sale quantity fits within the named lot.
-- Each account has the cash for its buys.
+- Each buy is funded inside its own account. Only actual `CASH` counts as cash. To spend `SGOV`, `BIL`, or `SGOVX`, the reply must include a same-account `SELL` of it and name that trade's ID in the buy's `funded_by`.
 - No buy creates a wash sale. The lookback covers all accounts.
 - No buy adds to the direct AI and semiconductor sleeve when the sleeve is at its no-add weight.
 
 The importer then recomputes proceeds, realized gain per lot, ST or LT status, days until long-term, and portfolio weights before and after. It prints `ACCEPTED` or `REJECTED`. Don't use any trade from a `REJECTED` reply.
+
+The importer doesn't know settlement dates or E\*TRADE buying power, so its funding status always ends in `SETTLEMENT_UNKNOWN`. Confirm buying power in E\*TRADE before you place a buy funded by a same-day sale.
 
 `ACCEPTED` means the trades fit your positions. It doesn't mean they are good trades. Read the reasoning, and read the realized-gain numbers in the saved `.json`, before you place anything.
 
@@ -189,13 +199,25 @@ python -m unittest discover -s tests -v
 
 ## Keep research between days
 
-To give the model context that E\*TRADE can't supply, copy `portfolio_context.example.json` to `portfolio_context.json` and fill it in. Git ignores the file. All three sections are optional:
+To give the model context that E\*TRADE can't supply, copy `portfolio_context.example.json` to `portfolio_context.json` and fill it in. Git ignores the file. All sections are optional:
 
 - `owner_profile` holds your horizon, cash reserve, withdrawals, tax facts, and hard limits.
 - `research` holds one dated record per held name or recurring candidate: the valuation or entry condition, the decision trigger, metrics, and primary sources.
-- `decision_history` holds earlier proposals and their conditions. Record an approval or an execution only when you have evidence of it. A model's recommendation is not an approval.
+- `decision_history` holds earlier proposals and their conditions. Record an approval or an execution only when you have evidence of it. A model's recommendation is not an approval. An `ACCEPTED` import appends its proposals here, marked `NOT APPROVED / NOT EXECUTED`.
+- `candidate_review_history` records the dates when an imported reply completed a candidate review.
 
 The prompt reports a blank owner profile as "not supplied", and the model flags a missing field only where it would change a trade. Without research notes, the model researches each focus name itself. Update the notes after earnings or a material event.
+
+The prompt asks for a candidate review (new places to put cash) on the first run, on any decision day, and when seven days have passed since the last requested review. The build saves the request date in `briefings/candidate_refresh_state.json`, so the weekly review works whether or not you import replies.
+
+## Include stock-plan shares that the API doesn't return
+
+The E\*TRADE API doesn't return the Synopsys stock-plan account. Record those lots in `docs/manual-stock-plan-holdings.md`. Git ignores the file. The build reads its `SNPS` rows and adds a separate supplement to the prompt:
+
+- On a live build, the script fetches a read-only `SNPS` quote and shows the combined total and combined `SNPS` weight next to the API-only totals.
+- If the quote fails, or the build is offline, the prompt marks combined exposure as incomplete.
+- If an API account reports the same `SNPS` lots, the build doesn't add them again.
+- `SNPS` is always a focus name. The manual shares never count as cash for trade funding, and their basis is an estimate, not tax basis.
 
 ## Data completeness
 
