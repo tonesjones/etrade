@@ -1116,7 +1116,11 @@ def _direct_numeric(value, *keys) -> float | None:
     return _as_float(_first(value, *keys))
 
 
-def parse_account_cash(resp: dict, account_type: str | None = None) -> float | None:
+def parse_account_cash(
+    resp: dict,
+    account_type: str | None = None,
+    account_mode: str | None = None,
+) -> float | None:
     """Cash plus sweep and a guarded margin debit, or None if absent."""
     if not isinstance(resp, dict) or "BalanceResponse" not in resp:
         return None
@@ -1129,6 +1133,7 @@ def parse_account_cash(resp: dict, account_type: str | None = None) -> float | N
     # negative value as a debit, and only when the account indicates margin.
     indicators = (
         account_type,
+        account_mode,
         _first(balance, "accountType"),
         _first(balance, "accountMode"),
     )
@@ -1555,7 +1560,9 @@ def fetch_portfolio_block(verbose: bool = True, allow_partial: bool = False):
                 account_total=total,
                 position_total=position_total,
                 cash_from_balance=parse_account_cash(
-                    balance_raw, account_type=a.get("accountType") or ""
+                    balance_raw,
+                    account_type=a.get("accountType") or "",
+                    account_mode=a.get("accountMode") or "",
                 ),
             )
             reconcile_account(label, holdings, total, source="Live portfolio")
