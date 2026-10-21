@@ -114,12 +114,19 @@ def snapshot_dict(holdings, metrics: dict, as_of: datetime) -> dict:
     }
 
 
-def save_weights_snapshot(snap: dict, as_of: datetime, briefings_dir: Path) -> Path:
+def save_weights_snapshot(
+    snap: dict, as_of: datetime, briefings_dir: Path, briefing_id: str | None = None
+) -> Path:
     briefings_dir.mkdir(exist_ok=True)
-    dated = briefings_dir / f"weights_{as_of.strftime('%Y-%m-%d')}.json"
+    suffix = briefing_id or as_of.strftime("%Y-%m-%d")
+    dated = briefings_dir / f"weights_{suffix}.json"
     latest = briefings_dir / "weights_latest.json"
     text = json.dumps(snap, indent=2)
     atomic_write_text(dated, text)
+    if briefing_id:
+        atomic_write_text(
+            briefings_dir / f"weights_{as_of.strftime('%Y-%m-%d')}.json", text
+        )
     atomic_write_text(latest, text)
     return dated
 
@@ -217,12 +224,19 @@ def observation_snapshot_dict(
     }
 
 
-def save_observation_snapshot(snap: dict, as_of: datetime, briefings_dir: Path) -> Path:
+def save_observation_snapshot(
+    snap: dict, as_of: datetime, briefings_dir: Path, briefing_id: str | None = None
+) -> Path:
     briefings_dir.mkdir(exist_ok=True)
-    dated = briefings_dir / f"observations_{as_of.strftime('%Y-%m-%d')}.json"
+    suffix = briefing_id or as_of.strftime("%Y-%m-%d")
+    dated = briefings_dir / f"observations_{suffix}.json"
     latest = briefings_dir / "observations_latest.json"
     text = json.dumps(snap, indent=2)
     atomic_write_text(dated, text)
+    if briefing_id:
+        atomic_write_text(
+            briefings_dir / f"observations_{as_of.strftime('%Y-%m-%d')}.json", text
+        )
     atomic_write_text(latest, text)
     return dated
 

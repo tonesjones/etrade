@@ -23,6 +23,8 @@ Cite every fact with its source and publication date, and prefer company release
 **Top-5 non-cash:** {top5_weight} · **Cash + cash equivalents:** {cash_value} ({cash_weight})
 **Cash composition:** {cash_components}
 
+{manual_supplement_block}
+
 **Focus names** (analyze every one):
 {focus_block}
 
@@ -100,6 +102,7 @@ Cite every fact with its source and publication date, and prefer company release
 {{
   "briefing_id": "{briefing_id}",
   "web_research": true,
+  "candidate_review_completed": false,
   "names": [
     {{"ticker": "XYZ", "view": "ATTRACTIVE | NEUTRAL | UNATTRACTIVE | INSUFFICIENT_EVIDENCE",
       "action": "KEEP | REDUCE | REPLACE | DEPLOY | NO_ACTION",
@@ -114,6 +117,6 @@ Cite every fact with its source and publication date, and prefer company release
 }}
 ```
 
-One `names` entry per focus name. `trades` is `[]` unless you propose REDUCE, REPLACE, or DEPLOY. A SELL in a taxable account must give `lot_acquired`; use one trade per lot. Give `est_price` only for a BUY of a ticker not in the holdings table. Set `web_research` to false if you could not search.
+One `names` entry per focus name. Set `candidate_review_completed` to true only when this prompt requested a candidate refresh and you actually completed section 3 with current research; otherwise leave it false. `trades` is `[]` unless you propose REDUCE, REPLACE, or DEPLOY. A SELL in a taxable account must give `lot_acquired`; use one trade per lot. Give `est_price` only for a BUY of a ticker not in the holdings table. Set `web_research` to false if you could not search.
 
 Keep a routine day under 1,000 words. Go longer only when proposing a trade or reporting material news.

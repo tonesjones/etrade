@@ -1492,7 +1492,10 @@ def fetch_portfolio_block(verbose: bool = True, allow_partial: bool = False):
 def atomic_write_text(path: Path, text: str) -> None:
     """Atomically replace a UTF-8 text artifact."""
     temp = path.with_name(path.name + ".tmp")
-    temp.write_text(text, encoding="utf-8")
+    # Preserve the caller's newline bytes.  The default Windows text writer
+    # turns an existing CRLF into CRCRLF, which creates blank lines on readback.
+    with temp.open("w", encoding="utf-8", newline="") as handle:
+        handle.write(text)
     temp.replace(path)
 
 

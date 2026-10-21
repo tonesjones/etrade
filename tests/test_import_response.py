@@ -1,6 +1,5 @@
 import io
 import json
-import os
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -95,10 +94,13 @@ class ImportResponseTests(unittest.TestCase):
         root = Path(self._tmp.name)
         self.briefings = root / "briefings"
         self.responses = root / "responses"
+        self.context = root / "portfolio_context.json"
+        self.context.write_text('{"decision_history": []}', encoding="utf-8")
         self.briefings.mkdir()
         for target, value in (
             ("BRIEFINGS_DIR", self.briefings),
             ("RESPONSES_DIR", self.responses),
+            ("CONTEXT_PATH", self.context),
         ):
             patcher = patch.object(imp, target, value)
             patcher.start()
@@ -144,7 +146,7 @@ class ImportResponseTests(unittest.TestCase):
             code = imp.main(["--engine", "claude", "--input-file", str(reply_file)])
         self.assertEqual(code, 0)
         saved = (self.responses / "2026-09-18_claude.md").read_bytes().decode("utf-8")
-        self.assertEqual(saved, reply_text().replace("\n", os.linesep))
+        self.assertEqual(saved, reply_text())
 
     def test_valid_no_trade_reply_is_accepted_and_saved(self):
         code, out = self.run_import(reply_text())
@@ -164,10 +166,9 @@ class ImportResponseTests(unittest.TestCase):
 
     def test_wrong_briefing_id_is_rejected(self):
         code, out = self.run_import(reply_text(briefing_id="someone-else"))
-        self.assertEqual(code, 1)
-        self.assertIn("REJECTED", out)
-        self.assertIn("briefing_id_mismatch", out)
-        self.assertTrue((self.responses / "2026-09-18_claude.json").exists())
+        self.assertEqual(code, 2)
+        self.assertEqual(out, "")
+        self.assertFalse((self.responses / "2026-09-18_claude.json").exists())
 
     def test_missing_focus_name_is_an_error(self):
         checks, _p, _c = self.validate(reply_text(names_list=names(skip=("BBB",))))
@@ -366,6 +367,8 @@ class ImportResponseTests(unittest.TestCase):
         self.assertEqual(saved["status"], "REJECTED")
         self.assertIsNone(saved["parsed"])
         self.assertTrue((self.responses / "2026-09-18_claude.md").exists())
+        context = json.loads(self.context.read_text(encoding="utf-8"))
+        self.assertEqual(context["decision_history"], [])
 
     def test_invalid_json_is_rejected_and_last_block_wins(self):
         code, out = self.run_import("```json\n{not json}\n```")
@@ -410,6 +413,42 @@ class ImportResponseTests(unittest.TestCase):
         self.assertTrue((self.responses / "2026-09-18_codex.json").exists())
         code, _out = self.run_import(reply_text(), extra=["--date", "2026-01-01"])
         self.assertEqual(code, 2)
+
+    def test_reply_id_selects_earlier_same_day_briefing(self):
+        morning_id = "2026-09-18-morning"
+        afternoon_id = "2026-09-18-afternoon"
+        morning_portfolio = self.briefings / "briefing_morning_portfolio.txt"
+        afternoon_portfolio = self.briefings / "briefing_afternoon_portfolio.txt"
+        morning_portfolio.write_text(fixture_text(), encoding="utf-8")
+
+        def remove_cash(payload):
+            cash = payload["accounts"][0]["holdings"][1]
+            cash["quantity"] = cash["market_value"] = 0.0
+            payload["accounts"][0]["total_value"] = 1000.0
+
+        afternoon_portfolio.write_text(fixture_text(remove_cash), encoding="utf-8")
+        for bid, portfolio_path in (
+            (morning_id, morning_portfolio),
+            (afternoon_id, afternoon_portfolio),
+        ):
+            meta = {
+                "schema_version": 1,
+                "briefing_id": bid,
+                "as_of": "2026-09-18T16:00:00-04:00",
+                "portfolio_file": portfolio_path.name,
+                "focus_symbols": ["AAA", "BBB"],
+                "monitor_symbols": [],
+            }
+            (self.briefings / f"briefing_{bid}.json").write_text(json.dumps(meta))
+            if bid == afternoon_id:
+                (self.briefings / "briefing_latest.json").write_text(json.dumps(meta))
+
+        reply = reply_text([buy(quantity=2)], briefing_id=morning_id)
+        code, out = self.run_import(reply, engine="chatgpt")
+        self.assertEqual(code, 0, out)
+        self.assertIn("ACCEPTED", out)
+        saved = json.loads((self.responses / "2026-09-18_chatgpt.json").read_text())
+        self.assertEqual(saved["briefing_id"], morning_id)
 
 
 if __name__ == "__main__":

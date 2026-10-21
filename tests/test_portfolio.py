@@ -441,7 +441,12 @@ class BriefingPolicyTests(unittest.TestCase):
                 patch.object(briefing, "BRIEFINGS_DIR", briefings),
                 patch.object(briefing, "OUT_DIR", prompts),
                 patch.object(
-                    briefing, "load_portfolio_context", return_value=({}, "_No context._")
+                    briefing,
+                    "load_portfolio_context",
+                    return_value=(
+                        {"candidate_review_history": [{"completed_at": "2026-09-17"}]},
+                        "_Recent candidate review._",
+                    ),
                 ),
             ):
                 prompt = briefing.build_prompt(
