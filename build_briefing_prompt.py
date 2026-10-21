@@ -811,15 +811,16 @@ def briefing_output_policy(
         current_breaches = {row["symbol"] for row in breaches}
         decision_day = decision_day or prior_breaches != current_breaches
 
-    if context is None:
-        # Compatibility for direct callers that have no continuity data.
-        raw_date = (prior_snap or {}).get("date") or (prior_snap or {}).get("as_of")
-        try:
-            previous_date = datetime.fromisoformat(str(raw_date)).date() if raw_date else None
-        except ValueError:
-            previous_date = None
-        weekly_due = bool(previous_date and (as_of.date() - previous_date).days >= 7)
-    else:
+    requested_dates = []
+    state_path = BRIEFINGS_DIR / "candidate_refresh_state.json"
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        raw_date = state.get("last_requested") if isinstance(state, dict) else None
+        if raw_date:
+            requested_dates.append(datetime.fromisoformat(str(raw_date)).date())
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        pass
+    if context is not None:
         completed_dates = []
         for record in context.get("candidate_review_history") or []:
             if not isinstance(record, dict):
@@ -829,8 +830,12 @@ def briefing_output_policy(
                 completed_dates.append(datetime.fromisoformat(str(raw_date)).date())
             except (TypeError, ValueError):
                 continue
-        last_completed = max(completed_dates) if completed_dates else None
-        weekly_due = last_completed is None or (as_of.date() - last_completed).days >= 7
+        requested_dates.extend(completed_dates)
+    last_requested = max(requested_dates) if requested_dates else None
+    days_since_request = (as_of.date() - last_requested).days if last_requested else None
+    # Keep same-day rebuilds useful: each saved briefing that requests a refresh
+    # still carries the request, while its date remains the cadence anchor.
+    weekly_due = last_requested is None or days_since_request in (0,) or days_since_request >= 7
     refresh_candidates = first_run or weekly_due or decision_day
     required = must_analyze_holdings(
         holdings, {row["symbol"] for row in harvest_reviews}
@@ -1349,6 +1354,12 @@ def save_briefing_result(
         atomic_write_text(BRIEFINGS_DIR / "briefing_latest.json", meta_text)
     save_weights_snapshot(result.weights_snapshot, as_of, BRIEFINGS_DIR, briefing_id)
     save_observation_snapshot(result.observation_snapshot, as_of, BRIEFINGS_DIR, briefing_id)
+    if (result.meta or {}).get("candidate_refresh_requested"):
+        BRIEFINGS_DIR.mkdir(exist_ok=True)
+        atomic_write_text(
+            BRIEFINGS_DIR / "candidate_refresh_state.json",
+            json.dumps({"last_requested": date_str, "briefing_id": briefing_id}, indent=2),
+        )
     return dated, latest
 
 

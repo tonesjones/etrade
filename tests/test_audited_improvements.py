@@ -188,6 +188,147 @@ class ContinuityAndCadenceTests(unittest.TestCase):
         )
         self.assertTrue(policy.refresh_candidates)
 
+    def test_quiet_daily_builds_refresh_on_day_one_and_day_eight(self):
+        base = briefing.snapshot_dict(
+            [], {"grand_total": 0, "cluster_w": 0, "broad_w": 0, "cash_w": 0,
+                 "top5_w": 0, "breaches": []}, AS_OF
+        )
+        observations = {"positions": [], "reviews": []}
+        context = {}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with (patch.object(briefing, "BRIEFINGS_DIR", root / "briefings"),
+                  patch.object(briefing, "OUT_DIR", root / "prompts"),
+                  patch.object(portfolio, "PROJECT_ROOT", root)):
+                decisions = []
+                for day in range(1, 11):
+                    as_of = AS_OF.replace(day=day)
+                    prior_date = (datetime(2026, 9, 30) if day == 1
+                                  else AS_OF.replace(day=day - 1))
+                    prior = base | {"date": prior_date.strftime("%Y-%m-%d")}
+                    policy = briefing.briefing_output_policy(
+                        [], [], [], prior, prior, observations, observations,
+                        as_of, context,
+                    )
+                    decisions.append(policy.refresh_candidates)
+                    result = briefing.BriefingBuildResult(
+                        "prompt", base, observations,
+                        {"briefing_id": f"2026-10-{day:02d}",
+                         "candidate_refresh_requested": policy.refresh_candidates},
+                    )
+                    briefing.save_briefing_result(result, "", as_of)
+                self.assertEqual(
+                    [index + 1 for index, refresh in enumerate(decisions) if refresh],
+                    [1, 8],
+                )
+
+    def test_same_day_rebuild_refreshes_without_advancing_state_date(self):
+        base = briefing.snapshot_dict(
+            [], {"grand_total": 0, "cluster_w": 0, "broad_w": 0, "cash_w": 0,
+                 "top5_w": 0, "breaches": []}, AS_OF
+        )
+        observations = {"positions": [], "reviews": []}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with patch.object(briefing, "BRIEFINGS_DIR", root / "briefings"), \
+                 patch.object(briefing, "OUT_DIR", root / "prompts"), \
+                 patch.object(portfolio, "PROJECT_ROOT", root):
+                first = briefing.BriefingBuildResult(
+                    "prompt", base, observations,
+                    {"briefing_id": "2026-10-21-one",
+                     "candidate_refresh_requested": True},
+                )
+                briefing.save_briefing_result(first, "", AS_OF)
+                second_policy = briefing.briefing_output_policy(
+                    [], [], [], base, base, observations, observations, AS_OF, {},
+                )
+                self.assertTrue(second_policy.refresh_candidates)
+                second = briefing.BriefingBuildResult(
+                    "prompt", base, observations,
+                    {"briefing_id": "2026-10-21-two",
+                     "candidate_refresh_requested": second_policy.refresh_candidates},
+                )
+                briefing.save_briefing_result(second, "", AS_OF)
+                state = json.loads(
+                    (root / "briefings" / "candidate_refresh_state.json").read_text()
+                )
+        self.assertEqual(state, {"last_requested": "2026-10-21",
+                                 "briefing_id": "2026-10-21-two"})
+
+    def test_import_history_and_saved_state_share_the_later_cadence_anchor(self):
+        base = briefing.snapshot_dict(
+            [], {"grand_total": 0, "cluster_w": 0, "broad_w": 0, "cash_w": 0,
+                 "top5_w": 0, "breaches": []}, AS_OF
+        )
+        observations = {"positions": [], "reviews": []}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state_dir = root / "briefings"
+            state_dir.mkdir()
+            (state_dir / "candidate_refresh_state.json").write_text(
+                json.dumps({"last_requested": "2026-10-18", "briefing_id": "saved"}),
+                encoding="utf-8",
+            )
+            with patch.object(briefing, "BRIEFINGS_DIR", state_dir):
+                policy = briefing.briefing_output_policy(
+                    [], [], [], base | {"date": "2026-10-20"}, base,
+                    observations, observations, AS_OF,
+                    {"candidate_review_history": [{"completed_at": "2026-10-20"}]},
+                )
+        self.assertFalse(policy.refresh_candidates)
+
+    def test_failed_save_does_not_record_candidate_refresh(self):
+        result = briefing.BriefingBuildResult(
+            "prompt", {"date": "2026-10-21"}, {"date": "2026-10-21"},
+            {"briefing_id": "failed", "candidate_refresh_requested": True},
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with (patch.object(briefing, "OUT_DIR", root / "prompts"),
+                  patch.object(briefing, "BRIEFINGS_DIR", root / "briefings"),
+                  patch.object(portfolio, "PROJECT_ROOT", root),
+                  patch.object(
+                      briefing, "save_weights_snapshot", side_effect=OSError("disk full")
+                  )):
+                with self.assertRaises(OSError):
+                    briefing.save_briefing_result(result, "", AS_OF)
+            self.assertFalse((root / "briefings" / "candidate_refresh_state.json").exists())
+
+    def test_decision_day_forces_candidate_refresh(self):
+        base = briefing.snapshot_dict(
+            [], {"grand_total": 0, "cluster_w": 0, "broad_w": 0, "cash_w": 0,
+                 "top5_w": 0, "breaches": []}, AS_OF
+        )
+        prior_observations = {"positions": [{"symbol": "AAA", "quantity": 10}],
+                              "reviews": []}
+        today_observations = {"positions": [{"symbol": "AAA", "quantity": 11}],
+                              "reviews": []}
+        context = {"candidate_review_history": [{"completed_at": "2026-10-20"}]}
+        with tempfile.TemporaryDirectory() as directory:
+            state_dir = Path(directory)
+            (state_dir / "candidate_refresh_state.json").write_text(
+                json.dumps({"last_requested": "2026-10-18", "briefing_id": "recent"}),
+                encoding="utf-8",
+            )
+            with patch.object(briefing, "BRIEFINGS_DIR", state_dir):
+                quiet_policy = briefing.briefing_output_policy(
+                    [], [], [], base, base, prior_observations, prior_observations,
+                    AS_OF, context,
+                )
+                policy = briefing.briefing_output_policy(
+                    [], [], [], base, base, today_observations, prior_observations,
+                    AS_OF, context,
+                )
+        self.assertFalse(quiet_policy.refresh_candidates)
+        self.assertTrue(policy.refresh_candidates)
+
+    def test_build_without_save_does_not_create_candidate_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with patch.object(briefing, "BRIEFINGS_DIR", root / "briefings"):
+                briefing.build_briefing([], [], 0, AS_OF, "")
+            self.assertFalse((root / "briefings" / "candidate_refresh_state.json").exists())
+
     def test_accepted_import_records_once_and_rejected_import_does_not(self):
         parsed = {
             "web_research": True,
