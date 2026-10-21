@@ -13,6 +13,7 @@ prompts/
 logs/
 portfolio_context.json
 responses/
+docs/manual-stock-plan-holdings.md
 
 # Python
 __pycache__/

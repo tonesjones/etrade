@@ -36,6 +36,7 @@ from portfolio_policy import active_policy, load_policy, set_active_policy
 PROJECT_ROOT = Path(__file__).resolve().parent
 BRIEFINGS_DIR = PROJECT_ROOT / "briefings"
 RESPONSES_DIR = PROJECT_ROOT / "responses"
+CONTEXT_PATH = PROJECT_ROOT / "portfolio_context.json"
 
 ENGINES = ("codex", "claude", "chatgpt", "grok", "other")
 VIEWS = frozenset({"ATTRACTIVE", "NEUTRAL", "UNATTRACTIVE", "INSUFFICIENT_EVIDENCE"})
@@ -47,6 +48,15 @@ WASH_WINDOW_DAYS = 30
 
 _JSON_FENCE = re.compile(r"```[ \t]*json[ \t]*\r?\n(.*?)```", re.DOTALL | re.IGNORECASE)
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def normalize_newlines(text: str) -> str:
+    """Use one stable representation for file, clipboard, save, and hash paths."""
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def reply_hash(reply: str) -> str:
+    return hashlib.sha256(normalize_newlines(reply).encode("utf-8")).hexdigest()
 
 
 class Checks:
@@ -330,15 +340,45 @@ def _check_buy(checks, trade, holdings_by_symbol):
     rec["amount"] = qty * price
 
 
-def _funding_checks(checks, buys, by_id):
+def _funding_checks(checks, buys, by_id, cash_available):
+    cash_remaining = dict(cash_available)
+    source_used: dict[str, float] = {}
     for trade in buys:
         tid = trade["id"]
+        amount = trade["record"].get("amount")
+        if amount is None:
+            continue
+        label = trade["account_label"]
         funded = trade.get("funded_by")
         if not isinstance(funded, str) or not funded.strip():
-            checks.warn("funded_by_missing", f"{tid}: BUY has no funded_by")
+            checks.error("funded_by_missing", f"{tid}: BUY has no funded_by")
             continue
         funded = funded.strip()
-        if funded.upper() in ("CASH", "SGOV"):
+        if funded.upper() == "CASH":
+            if amount > cash_remaining.get(label, 0.0) + 0.005:
+                checks.error(
+                    "insufficient_cash",
+                    f"{tid}: BUY costs {_money(amount)} but only "
+                    f"{_money(cash_remaining.get(label, 0.0))} of actual CASH is available "
+                    f"in {label}; name a same-account SELL trade as funded_by",
+                )
+            else:
+                cash_remaining[label] = cash_remaining.get(label, 0.0) - amount
+            continue
+        if funded.upper() in active_policy().cash_symbols:
+            if amount <= cash_remaining.get(label, 0.0) + 0.005:
+                cash_remaining[label] = cash_remaining.get(label, 0.0) - amount
+                checks.warn(
+                    "cash_equivalent_label_ignored",
+                    f"{tid}: funded_by {funded!r} is not funding evidence; actual CASH "
+                    "covers this BUY",
+                )
+            else:
+                checks.error(
+                    "funding_sale_required",
+                    f"{tid}: funded_by {funded!r} is only a label. Sell the funding security "
+                    "explicitly in the same account and reference that SELL trade id.",
+                )
             continue
         source = by_id.get(funded)
         if source is None:
@@ -351,6 +391,26 @@ def _funding_checks(checks, buys, by_id):
                 f"{tid}: funded by {funded} in {source.get('account_label')}, but cash cannot "
                 f"move between accounts (this BUY is in {trade.get('account_label')})",
             )
+        elif not source["record"].get("valid") or source["record"].get("amount") is None:
+            checks.error(
+                "funding_source_invalid", f"{tid}: funding SELL {funded} did not validate"
+            )
+        else:
+            proceeds = source["record"]["amount"]
+            used = source_used.get(funded, 0.0)
+            source_part = min(amount, max(0.0, proceeds - used))
+            cash_part = amount - source_part
+            if cash_part > cash_remaining.get(label, 0.0) + 0.005:
+                code = "funding_overallocated" if used > 0 else "funding_insufficient"
+                checks.error(
+                    code,
+                    f"{tid}: BUY costs {_money(amount)}, but {funded} has only "
+                    f"{_money(max(0.0, proceeds - used))} unallocated and the account has "
+                    f"only {_money(cash_remaining.get(label, 0.0))} remaining CASH",
+                )
+            else:
+                source_used[funded] = used + source_part
+                cash_remaining[label] = cash_remaining.get(label, 0.0) - cash_part
 
 
 def _check_trades(checks, parsed, results, as_of, holdings_by_symbol):
@@ -414,31 +474,21 @@ def _check_trades(checks, parsed, results, as_of, holdings_by_symbol):
     sells = [t for t in structurally_ok if t["side"] == "SELL" and t["record"]["valid"]]
     buys = [t for t in structurally_ok if t["side"] == "BUY"]
 
-    # Cash is per account: existing cash-symbol holdings plus same-account sale proceeds.
-    available: dict[str, float] = {}
+    # Actual CASH is distinct from securities the policy treats as cash equivalents.
+    cash_available: dict[str, float] = {}
+    economic_available: dict[str, float] = {}
     for account in results:
-        available[account["label"]] = sum(
-            h["market_value"] for h in account["holdings"] if is_cash_symbol(h["symbol"])
+        cash_available[account["label"]] = sum(
+            h["market_value"] for h in account["holdings"]
+            if (h.get("symbol") or "").upper() == "CASH"
         )
+        economic_available[account["label"]] = cash_available[account["label"]]
     for sell in sells:
-        if not sell["record"].get("cash_symbol"):
-            available[sell["account_label"]] += sell["record"]["amount"]
-    spent: dict[str, float] = {}
-    for buy in buys:
-        if buy["record"].get("amount") is not None:
-            label = buy["account_label"]
-            spent[label] = spent.get(label, 0.0) + buy["record"]["amount"]
-    for label, cost in spent.items():
-        if cost > available.get(label, 0.0) + 0.005:
-            checks.error(
-                "insufficient_cash",
-                f"BUYs in {label} cost {_money(cost)} but only {_money(available.get(label, 0.0))} "
-                "is available there (cash cannot move between accounts)",
-            )
-    _funding_checks(checks, buys, by_id)
+        economic_available[sell["account_label"]] += sell["record"]["amount"]
+    _funding_checks(checks, buys, by_id, cash_available)
 
     _check_wash_sales(checks, sells, buys, results, as_of)
-    return trades, sells, buys, available
+    return trades, sells, buys, economic_available
 
 
 def _check_wash_sales(checks, sells, buys, results, as_of) -> None:
@@ -598,7 +648,12 @@ def validate_reply(
 ):
     """Return (checks, parsed, computed). Never raises on bad model output."""
     checks = Checks()
-    computed: dict = {"trades": [], "weights": None, "tax_summary": None}
+    computed: dict = {
+        "trades": [],
+        "weights": None,
+        "tax_summary": None,
+        "funding_status": "STRUCTURAL_CHECKS_PENDING_SETTLEMENT_UNKNOWN",
+    }
     block = extract_json_block(reply)
     if block is None:
         checks.error(
@@ -666,6 +721,11 @@ def validate_reply(
             "quantity": trade.get("quantity"),
         })
         computed["trades"].append(rec)
+    computed["funding_status"] = (
+        "STRUCTURAL_ERRORS_SETTLEMENT_UNKNOWN"
+        if checks.has_error
+        else "STRUCTURAL_CHECKS_PASSED_SETTLEMENT_UNKNOWN"
+    )
     return checks, parsed, computed
 
 
@@ -685,6 +745,7 @@ def save_response(
     reply, meta, engine, status, parsed, checks, computed, date_str
 ) -> tuple[Path, Path]:
     RESPONSES_DIR.mkdir(parents=True, exist_ok=True)
+    reply = normalize_newlines(reply)
     stem = _unique_stem(RESPONSES_DIR, f"{date_str}_{engine}")
     md_path = RESPONSES_DIR / f"{stem}.md"
     json_path = RESPONSES_DIR / f"{stem}.json"
@@ -694,7 +755,7 @@ def save_response(
         "engine": engine,
         "imported_at": now_et().isoformat(),
         "status": status,
-        "reply_sha256": hashlib.sha256(reply.encode("utf-8")).hexdigest(),
+        "reply_sha256": reply_hash(reply),
         "parsed": parsed,
         "checks": checks.items,
         "computed": computed,
@@ -702,6 +763,67 @@ def save_response(
     atomic_write_text(md_path, reply)
     atomic_write_text(json_path, json.dumps(payload, indent=2, ensure_ascii=False))
     return md_path, json_path
+
+
+def record_accepted_response(
+    path: Path,
+    parsed: dict,
+    meta: dict,
+    engine: str,
+    response_sha256: str,
+) -> None:
+    """Append validated model provenance without changing owner-maintained research."""
+    context = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    if not isinstance(context, dict):
+        raise PortfolioDataError(f"{path} must contain a JSON object")
+    record_key = f"{meta.get('briefing_id')}:{engine}:{response_sha256}"
+    history = context.setdefault("decision_history", [])
+    if not isinstance(history, list):
+        raise PortfolioDataError("portfolio_context.json decision_history must be a list")
+    if not any(isinstance(item, dict) and item.get("record_id") == record_key for item in history):
+        names = [item for item in parsed.get("names") or [] if isinstance(item, dict)]
+        actions = [
+            f"{item.get('ticker', 'UNKNOWN')} {item.get('action', 'UNKNOWN')}"
+            for item in names
+        ]
+        triggers = [
+            f"{item.get('ticker', 'UNKNOWN')}: {item['trigger']}"
+            for item in names if item.get("trigger")
+        ]
+        history.append({
+            "record_id": record_key,
+            "source_briefing_id": meta.get("briefing_id"),
+            "source_reply_sha256": response_sha256,
+            "as_of": str(meta.get("as_of") or "")[:10],
+            "engine": engine,
+            "scope": ", ".join(str(item.get("ticker") or "UNKNOWN") for item in names)
+            or "portfolio",
+            "portfolio_action": "; ".join(actions) or "NO_ACTION",
+            "decision_basis": "MODEL RECOMMENDATION — STRUCTURE VALIDATED ONLY",
+            "decision_trigger": "; ".join(triggers) or "UNKNOWN",
+            "approval_state": "NOT APPROVED / NOT EXECUTED",
+            "proposed_trades": parsed.get("trades") or [],
+        })
+    if (
+        meta.get("candidate_refresh_requested")
+        and parsed.get("candidate_review_completed") is True
+        and parsed.get("web_research") is True
+    ):
+        reviews = context.setdefault("candidate_review_history", [])
+        if not isinstance(reviews, list):
+            raise PortfolioDataError(
+                "portfolio_context.json candidate_review_history must be a list"
+            )
+        if not any(
+            isinstance(item, dict) and item.get("record_id") == record_key for item in reviews
+        ):
+            reviews.append({
+                "record_id": record_key,
+                "source_briefing_id": meta.get("briefing_id"),
+                "engine": engine,
+                "completed_at": now_et().date().isoformat(),
+            })
+    atomic_write_text(path, json.dumps(context, indent=2, ensure_ascii=False) + "\n")
 
 
 def format_report(status, checks, computed, engine, date_str) -> str:
@@ -715,6 +837,11 @@ def format_report(status, checks, computed, engine, date_str) -> str:
         lines.append("")
     trades = computed.get("trades") or []
     if trades:
+        lines.append(
+            f"FUNDING: {computed.get('funding_status')}. Settlement and broker buying capacity "
+            "remain UNKNOWN and require broker confirmation."
+        )
+        lines.append("")
         lines.append("COMPUTED TRADES")
         for t in trades:
             amount = _money(t.get("amount"))
@@ -758,30 +885,52 @@ def format_report(status, checks, computed, engine, date_str) -> str:
     return "\n".join(lines)
 
 
-def _read_raw_reply(args) -> str:
+def _read_reply(args) -> str:
     if args.from_clipboard:
-        return read_clipboard_text()
+        return normalize_newlines(read_clipboard_text())
     if args.input_file == "-":
-        return sys.stdin.read()
+        return normalize_newlines(sys.stdin.read())
     raw = Path(args.input_file).read_bytes()
     if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
-        return raw.decode("utf-16")
-    return raw.decode("utf-8-sig", errors="replace")
+        return normalize_newlines(raw.decode("utf-16"))
+    return normalize_newlines(raw.decode("utf-8-sig", errors="replace"))
 
 
-def _read_reply(args) -> str:
-    # Windows files and clipboard text use CRLF. Text-mode saves would turn
-    # each CRLF into CR CR LF, so normalize to LF before hashing or saving.
-    return _read_raw_reply(args).replace("\r\n", "\n").replace("\r", "\n")
-
-
-def _load_briefing(date_arg: str | None) -> tuple[dict, str]:
-    name = f"briefing_{date_arg}.json" if date_arg else "briefing_latest.json"
-    path = BRIEFINGS_DIR / name
+def _load_briefing(
+    date_arg: str | None, briefing_id: str | None = None
+) -> tuple[dict, str]:
+    if briefing_id:
+        path = BRIEFINGS_DIR / f"briefing_{briefing_id}.json"
+        if not path.exists():
+            latest = BRIEFINGS_DIR / "briefing_latest.json"
+            if latest.exists():
+                latest_meta = json.loads(latest.read_text(encoding="utf-8"))
+                if latest_meta.get("briefing_id") == briefing_id:
+                    path = latest
+    elif date_arg:
+        candidates = sorted(BRIEFINGS_DIR.glob(f"briefing_{date_arg}*.json"))
+        by_identity = {}
+        for candidate in candidates:
+            candidate_meta = json.loads(candidate.read_text(encoding="utf-8"))
+            identity = candidate_meta.get("briefing_id") or candidate.name
+            by_identity.setdefault(identity, candidate)
+        if len(by_identity) > 1:
+            raise PortfolioDataError(
+                f"Multiple briefings exist for {date_arg}; import by exact briefing_id"
+            )
+        path = (
+            next(iter(by_identity.values()))
+            if by_identity
+            else BRIEFINGS_DIR / f"briefing_{date_arg}.json"
+        )
+    else:
+        path = BRIEFINGS_DIR / "briefing_latest.json"
     if not path.exists():
         raise PortfolioDataError(f"{path} not found; run build_briefing_prompt.py first")
     meta = json.loads(path.read_text(encoding="utf-8"))
-    date_str = date_arg or str(meta.get("as_of") or "")[:10]
+    if briefing_id and meta.get("briefing_id") != briefing_id:
+        raise PortfolioDataError(f"No saved briefing matches briefing_id {briefing_id}")
+    date_str = str(meta.get("as_of") or "")[:10]
     if not _valid_date(date_str):
         raise PortfolioDataError(f"cannot determine the briefing date from {path}")
     return meta, date_str
@@ -799,6 +948,9 @@ def main(argv=None) -> int:
     source.add_argument("--input-file", help="Read the reply from a file, or '-' for stdin.")
     parser.add_argument("--date", help="Briefing date YYYY-MM-DD (default: briefing_latest.json).")
     parser.add_argument(
+        "--briefing-id", help="Exact saved briefing identity (normally read from reply)."
+    )
+    parser.add_argument(
         "--policy", type=Path, help="Use this policy JSON instead of portfolio_policy.json."
     )
     args = parser.parse_args(argv)
@@ -812,11 +964,21 @@ def main(argv=None) -> int:
         pass
 
     try:
-        meta, date_str = _load_briefing(args.date)
+        reply = _read_reply(args)
+        reply_id = None
+        block = extract_json_block(reply)
+        if block:
+            try:
+                preliminary = json.loads(block)
+                if isinstance(preliminary, dict) and preliminary.get("briefing_id"):
+                    reply_id = str(preliminary["briefing_id"])
+            except json.JSONDecodeError:
+                pass
+        selected_id = args.briefing_id or (None if args.date else reply_id)
+        meta, date_str = _load_briefing(args.date, selected_id)
         portfolio_path = BRIEFINGS_DIR / str(meta.get("portfolio_file") or "")
         text = portfolio_path.read_text(encoding="utf-8")
         _formatted, grand_total, _n, results, as_of = parse_portable_portfolio_text(text)
-        reply = _read_reply(args)
     except (PortfolioDataError, OSError, ValueError) as exc:
         print(f"Cannot import: {exc}", file=sys.stderr)
         return 2
@@ -826,6 +988,14 @@ def main(argv=None) -> int:
     md_path, json_path = save_response(
         reply, meta, args.engine, status, parsed, checks, computed, date_str
     )
+    if status == "ACCEPTED" and isinstance(parsed, dict):
+        try:
+            record_accepted_response(
+                CONTEXT_PATH, parsed, meta, args.engine, reply_hash(reply)
+            )
+        except (OSError, ValueError, PortfolioDataError) as exc:
+            print(f"Cannot record accepted response continuity: {exc}", file=sys.stderr)
+            return 2
     print(format_report(status, checks, computed, args.engine, date_str))
     print(f"Saved reply:  {md_path}")
     print(f"Saved checks: {json_path}")

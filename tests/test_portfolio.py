@@ -234,6 +234,30 @@ class CashLotTests(unittest.TestCase):
         response = {"BalanceResponse": {"Computed": {"netCash": 250.0}}}
         self.assertEqual(portfolio.parse_account_cash(response), 250.0)
 
+    def test_parse_account_cash_ignores_positive_margin_balance_with_warning(self):
+        response = {"BalanceResponse": {
+            "accountMode": "MARGIN",
+            "Computed": {"cashBalance": 40.0, "marginBalance": 60.0},
+        }}
+        with patch.object(portfolio.LOGGER, "warning") as warning:
+            self.assertEqual(portfolio.parse_account_cash(response), 40.0)
+        warning.assert_called_once()
+
+    def test_parse_account_cash_only_applies_negative_debit_for_margin_account(self):
+        response = {"BalanceResponse": {
+            "Computed": {"cashBalance": 40.0, "marginBalance": -10.0},
+        }}
+        with patch.object(portfolio.LOGGER, "warning") as warning:
+            self.assertEqual(portfolio.parse_account_cash(response, account_type="CASH"), 40.0)
+        warning.assert_called_once()
+
+    def test_parse_account_cash_ordinary_cash_without_margin_is_unchanged(self):
+        response = {"BalanceResponse": {
+            "Computed": {"cashBalance": 40.0},
+            "Cash": {"moneyMktBalance": 60.0},
+        }}
+        self.assertEqual(portfolio.parse_account_cash(response, account_type="CASH"), 100.0)
+
     def test_official_zero_cash_does_not_synthesize_residual(self):
         holdings = []
         portfolio.apply_cash_lot(
@@ -441,7 +465,12 @@ class BriefingPolicyTests(unittest.TestCase):
                 patch.object(briefing, "BRIEFINGS_DIR", briefings),
                 patch.object(briefing, "OUT_DIR", prompts),
                 patch.object(
-                    briefing, "load_portfolio_context", return_value=({}, "_No context._")
+                    briefing,
+                    "load_portfolio_context",
+                    return_value=(
+                        {"candidate_review_history": [{"completed_at": "2026-09-17"}]},
+                        "_Recent candidate review._",
+                    ),
                 ),
             ):
                 prompt = briefing.build_prompt(

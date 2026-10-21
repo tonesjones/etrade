@@ -8,12 +8,13 @@ Also importable: fetch_portfolio_block() used by build_briefing_prompt.py
 
 READ-ONLY SAFEGUARD
 -------------------
-This module only uses pyetrade.ETradeAccounts for:
+This module only uses read-only pyetrade APIs:
   - list_accounts
   - get_account_portfolio
   - get_account_balance
   - get portfolio tax lots
-It never imports or constructs ETradeOrder / market order helpers.
+  - get_quote for the manual SNPS valuation supplement
+It never imports or constructs ETradeOrder or another order client.
 No preview, place, cancel, or change-order calls exist in this repo.
 """
 
@@ -22,6 +23,7 @@ from __future__ import annotations
 import json
 import locale
 import logging
+import math
 import os
 import re
 import subprocess
@@ -39,8 +41,8 @@ from dotenv import load_dotenv
 
 from portfolio_policy import active_policy, load_policy, set_active_policy
 
-# Explicit allow-list: only the Accounts API surface is used (list + portfolio).
-# Do not import or construct pyetrade.ETradeOrder — trading is intentionally unsupported.
+# Accounts client construction is restricted to the read-only Accounts API.
+# ETradeMarket is used only for quote reads; order APIs are intentionally unsupported.
 _ALLOWED_PYETRADE_TYPES = (pyetrade.ETradeAccounts,)
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -975,7 +977,7 @@ def check_auth_date(today: datetime | None = None) -> None:
 
 
 def get_accounts_api():
-    """Return a READ-ONLY accounts client (list + portfolio only)."""
+    """Return the READ-ONLY accounts client."""
     c = _credentials()
     check_auth_date()
     client = pyetrade.ETradeAccounts(
@@ -989,6 +991,87 @@ def get_accounts_api():
     if not isinstance(client, _ALLOWED_PYETRADE_TYPES):
         raise RuntimeError("Refusing non-accounts E*TRADE client (read-only policy).")
     return client, c
+
+
+def _quote_value(mapping, key):
+    if not isinstance(mapping, dict):
+        return None
+    return next((value for name, value in mapping.items()
+                 if str(name).lower() == key.lower()), None)
+
+
+def _quote_datetime(raw):
+    if raw in (None, ""):
+        return None
+    try:
+        parsed = parse_etrade_date(raw)
+    except (OverflowError, OSError, ValueError):
+        parsed = None
+    if parsed is not None:
+        return parsed
+    value = str(raw).strip()
+    if ":" not in value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        match = re.fullmatch(
+            r"(\d{2}:\d{2}:\d{2})\s+(EDT|EST|PDT|PST)\s+(\d{2}-\d{2}-\d{4})",
+            value,
+            re.IGNORECASE,
+        )
+        if not match:
+            return None
+        offsets = {"EDT": "-0400", "EST": "-0500", "PDT": "-0700", "PST": "-0800"}
+        zone = match.group(2).upper()
+        try:
+            parsed = datetime.strptime(
+                f"{match.group(1)} {offsets[zone]} {match.group(3)}",
+                "%H:%M:%S %z %m-%d-%Y",
+            )
+        except ValueError:
+            return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=ET)
+    return to_et(parsed)
+
+
+def parse_snps_quote(response: dict) -> tuple[float, datetime]:
+    """Validate and return a positive SNPS last-trade price and quote timestamp."""
+    quote_response = _quote_value(response, "QuoteResponse")
+    data = _quote_value(quote_response, "quoteData")
+    quote_rows = data if isinstance(data, list) else [data]
+    for quote in quote_rows:
+        if not isinstance(quote, dict):
+            continue
+        price = None
+        for section in ("all", "fundamental", "intraday"):
+            value = _quote_value(_quote_value(quote, section), "lastTrade")
+            try:
+                parsed_price = float(value)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(parsed_price) and parsed_price > 0:
+                price = parsed_price
+                break
+        timestamp = _quote_datetime(_quote_value(quote, "dateTimeUTC"))
+        if timestamp is None:
+            timestamp = _quote_datetime(_quote_value(quote, "dateTime"))
+        if price is not None and timestamp is not None:
+            return price, timestamp
+    raise PortfolioDataError("E*TRADE quote omitted a positive SNPS price or valid timestamp")
+
+
+def fetch_snps_quote() -> tuple[float, datetime]:
+    """READ: fetch a timestamped SNPS quote without constructing an order client."""
+    c = _credentials()
+    check_auth_date()
+    market_api = pyetrade.ETradeMarket(
+        c["consumer_key"], c["consumer_secret"], c["access_token"],
+        c["access_token_secret"], dev=c["dev"],
+    )
+    response = _retry_read(lambda: market_api.get_quote(["SNPS"], resp_format="json"))
+    return parse_snps_quote(response)
 
 
 def list_accounts(accounts_api=None):
@@ -1033,13 +1116,34 @@ def _direct_numeric(value, *keys) -> float | None:
     return _as_float(_first(value, *keys))
 
 
-def parse_account_cash(resp: dict) -> float | None:
-    """Settled cash + money-market sweep from the balance payload, or None if absent."""
+def parse_account_cash(
+    resp: dict,
+    account_type: str | None = None,
+    account_mode: str | None = None,
+) -> float | None:
+    """Cash plus sweep and a guarded margin debit, or None if absent."""
     if not isinstance(resp, dict) or "BalanceResponse" not in resp:
         return None
     balance = resp["BalanceResponse"]
     computed = _first(balance, "Computed", "computed") or {}
     cash_obj = _first(balance, "Cash", "cash") or {}
+
+    # https://apisb.etrade.com/docs/api/account/api-balance-v1.html documents
+    # marginBalance but does not document its sign convention. Treat only a
+    # negative value as a debit, and only when the account indicates margin.
+    indicators = (
+        account_type,
+        account_mode,
+        _first(balance, "accountType"),
+        _first(balance, "accountMode"),
+    )
+    margin_account = any("MARGIN" in str(value).upper() for value in indicators if value)
+    margin_account = margin_account or _first(balance, "Margin") is not None
+    margin_balance = _direct_numeric(computed, "marginBalance")
+    if margin_balance is not None and margin_balance > 0:
+        LOGGER.warning("Ignoring positive marginBalance; its sign is not documented as a debit.")
+    elif margin_balance is not None and margin_balance < 0 and not margin_account:
+        LOGGER.warning("Ignoring negative marginBalance without a margin-account indicator.")
 
     cash_balance = _direct_numeric(computed, "cashBalance")
     if cash_balance is None:
@@ -1048,7 +1152,12 @@ def parse_account_cash(resp: dict) -> float | None:
     if mmkt is None:
         mmkt = _direct_numeric(cash_obj, "moneyMktBalance")
     if cash_balance is not None or mmkt is not None:
-        return (cash_balance or 0.0) + (mmkt or 0.0)
+        debit = (
+            margin_balance
+            if margin_account and margin_balance is not None and margin_balance < 0
+            else 0.0
+        )
+        return (cash_balance or 0.0) + (mmkt or 0.0) + debit
 
     net_cash = _direct_numeric(computed, "netCash")
     if net_cash is None:
@@ -1442,15 +1551,19 @@ def fetch_portfolio_block(verbose: bool = True, allow_partial: bool = False):
         try:
             raw = get_portfolio(key, accounts_api)
             holdings, position_total = extract_holdings(raw)
+            balance_raw = get_account_balance(key, a.get("accountType") or "", accounts_api)
             attach_lots(accounts_api, holdings, verbose=verbose, strict=True)
             check_lot_quantities(label, holdings)
-            balance_raw = get_account_balance(key, a.get("accountType") or "", accounts_api)
             total = parse_account_balance(balance_raw)
             apply_cash_lot(
                 holdings,
                 account_total=total,
                 position_total=position_total,
-                cash_from_balance=parse_account_cash(balance_raw),
+                cash_from_balance=parse_account_cash(
+                    balance_raw,
+                    account_type=a.get("accountType") or "",
+                    account_mode=a.get("accountMode") or "",
+                ),
             )
             reconcile_account(label, holdings, total, source="Live portfolio")
             results.append({
@@ -1490,7 +1603,10 @@ def fetch_portfolio_block(verbose: bool = True, allow_partial: bool = False):
 def atomic_write_text(path: Path, text: str) -> None:
     """Atomically replace a UTF-8 text artifact."""
     temp = path.with_name(path.name + ".tmp")
-    temp.write_text(text, encoding="utf-8")
+    # Preserve the caller's newline bytes.  The default Windows text writer
+    # turns an existing CRLF into CRCRLF, which creates blank lines on readback.
+    with temp.open("w", encoding="utf-8", newline="") as handle:
+        handle.write(text)
     temp.replace(path)
 
 
@@ -1546,6 +1662,17 @@ def main(argv=None) -> int:
     except AuthExpiredError as exc:
         print(f"\n{exc}", file=sys.stderr)
         return 2
+    if any(result.get("error") for result in _results):
+        out_dir = PROJECT_ROOT / "briefings"
+        out_dir.mkdir(exist_ok=True)
+        path = out_dir / f"portfolio_partial_{as_of.strftime('%Y-%m-%d')}.txt"
+        atomic_write_text(path, formatted + "\n")
+        print()
+        print(formatted)
+        print(f"\nSaved incomplete report: {path}")
+        print("Complete portfolio_latest.txt retained; clipboard not updated.")
+        print("Partial report is for inspection only; offline briefing requires complete data.")
+        return 0
     portable = format_portable_portfolio_text(formatted, _results, as_of)
     path = save_portfolio_block(portable, as_of=as_of)
     clipped = copy_to_clipboard(portable)

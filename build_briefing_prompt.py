@@ -14,7 +14,7 @@ import re
 import sys
 from argparse import ArgumentParser
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from hashlib import sha256
 from pathlib import Path
@@ -37,11 +37,13 @@ from briefing_snapshots import (  # noqa: F401 - re-exported for callers and tes
 from get_portfolio import (
     PORTABLE_BEGIN,
     AuthExpiredError,
+    PortfolioDataError,
     account_tail,
     atomic_write_text,
     copy_to_clipboard,
     days_to_long_term,
     fetch_portfolio_block,
+    fetch_snps_quote,
     fmt_signed_money,
     fmt_signed_pct,
     format_portable_portfolio_text,
@@ -61,6 +63,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 OUT_DIR = PROJECT_ROOT / "prompts"
 BRIEFINGS_DIR = PROJECT_ROOT / "briefings"
 CONTEXT_PATH = PROJECT_ROOT / "portfolio_context.json"
+MANUAL_HOLDINGS_PATH = PROJECT_ROOT / "docs" / "manual-stock-plan-holdings.md"
 # Offline input older than this is refused unless --allow-stale is given.
 MAX_OFFLINE_AGE_HOURS = 24
 
@@ -74,10 +77,23 @@ class BriefingBuildResult:
     meta: dict | None = None
 
 
-def make_briefing_id(as_of: datetime, weights_snapshot: dict) -> str:
+def make_briefing_id(as_of: datetime, weights_snapshot: dict, identity: dict | None = None) -> str:
     """Date plus a short hash of the data, so a reply can be matched to its prompt."""
-    digest = sha256(json.dumps(weights_snapshot, sort_keys=True).encode("utf-8")).hexdigest()
+    payload = identity if identity is not None else weights_snapshot
+    digest = sha256(
+        json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest()
     return f"{as_of:%Y-%m-%d}-{digest[:8]}"
+
+
+def _canonical_identity(value):
+    if isinstance(value, dict):
+        return {key: _canonical_identity(item) for key, item in sorted(value.items())}
+    if isinstance(value, (set, frozenset)):
+        return sorted(_canonical_identity(item) for item in value)
+    if isinstance(value, (tuple, list)):
+        return [_canonical_identity(item) for item in value]
+    return value
 
 
 @dataclass(frozen=True)
@@ -103,6 +119,170 @@ def load_portfolio_context(path: Path = CONTEXT_PATH) -> tuple[dict, str]:
     if not isinstance(data, dict):
         return {}, "_portfolio_context.json must contain a JSON object; treat context as unavailable._"
     return data, f"_Loaded local portfolio context updated {data.get('updated_at', 'date not recorded')}._"
+
+
+def load_manual_holdings(path: Path = MANUAL_HOLDINGS_PATH) -> dict | None:
+    """Parse the owner-maintained Markdown table without duplicating its data."""
+    if not path.exists():
+        return None
+    lots = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.startswith("|"):
+            continue
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        if len(cells) != 6 or cells[0].upper() != "SNPS":
+            continue
+        try:
+            shares = float(cells[3].replace(",", ""))
+            basis = float(cells[4].replace("$", "").replace(",", ""))
+            datetime.fromisoformat(cells[1])
+        except ValueError as exc:
+            raise PortfolioDataError(f"Invalid manual stock-plan row: {line}") from exc
+        lots.append({
+            "symbol": "SNPS",
+            "acquired": cells[1],
+            "benefit_type": cells[2],
+            "shares": shares,
+            "estimated_basis_per_share": basis,
+            "capital_gains_status": cells[5],
+        })
+    if not lots:
+        raise PortfolioDataError(f"No SNPS lots found in {path}")
+    return {
+        "source": str(path),
+        "lots": lots,
+        "total_shares": sum(lot["shares"] for lot in lots),
+    }
+
+
+def _manual_is_api_covered(manual: dict, results: list[dict] | None) -> bool:
+    expected = manual["total_shares"]
+    expected_lots = sorted((lot["acquired"], lot["shares"]) for lot in manual["lots"])
+    for result in results or []:
+        for holding in result.get("holdings") or []:
+            if (holding.get("symbol") or "").upper() != "SNPS":
+                continue
+            if abs((holding.get("quantity") or 0.0) - expected) > 1e-6:
+                continue
+            api_lots = []
+            for lot in holding.get("lots") or []:
+                acquired = lot.get("acquired")
+                if isinstance(acquired, datetime):
+                    acquired = acquired.date().isoformat()
+                elif acquired:
+                    acquired = str(acquired)[:10]
+                api_lots.append((acquired or "", lot.get("qty") or 0.0))
+            if sorted(api_lots) == expected_lots:
+                return True
+    return False
+
+
+def format_manual_supplement(
+    manual: dict | None,
+    results: list[dict] | None,
+    api_total: float,
+    as_of: datetime,
+    quote: tuple[float, datetime] | None = None,
+    quote_error: Exception | None = None,
+) -> tuple[str, dict]:
+    """Render manual lots separately from API totals and return identity data."""
+    if not manual:
+        return (
+            "**Manual stock-plan supplement:** unavailable. Combined exposure is incomplete.",
+            {"coverage": "missing", "lots": [], "price": None, "price_as_of": None},
+        )
+    identity = {
+        "coverage": "manual",
+        "lots": manual["lots"],
+        "total_shares": manual["total_shares"],
+        "price": None,
+        "price_as_of": None,
+        "quote_price": None,
+        "quote_timestamp": None,
+    }
+    if _manual_is_api_covered(manual, results):
+        identity["coverage"] = "api"
+        return (
+            "**Manual stock-plan supplement:** the "
+            f"{fmt_qty(manual['total_shares'])} SNPS shares appear already covered by "
+            "an API holding with the same total quantity, so they are not added again. Broker "
+            "reconciliation remains limited to API-covered accounts.",
+            identity,
+        )
+
+    api_snps = [
+        holding
+        for result in results or []
+        for holding in result.get("holdings") or []
+        if (holding.get("symbol") or "").upper() == "SNPS" and (holding.get("price") or 0) > 0
+    ]
+    price = float(api_snps[0]["price"]) if api_snps else None
+    price_as_of = as_of if price is not None else None
+    quote_price = quote_timestamp = None
+    if price is None and quote is not None:
+        quote_price, quote_timestamp = quote
+        if quote_price > 0 and isinstance(quote_timestamp, datetime):
+            price = float(quote_price)
+            price_as_of = quote_timestamp
+        else:
+            quote_price = quote_timestamp = None
+    rows = [
+        "| Symbol | Acquired | Type | Shares | Estimated basis/share |",
+        "|---|---|---|---:|---:|",
+    ]
+    rows.extend(
+        f"| SNPS | {lot['acquired']} | {lot['benefit_type']} | {fmt_qty(lot['shares'])} | "
+        f"${lot['estimated_basis_per_share']:,.2f} unverified |"
+        for lot in manual["lots"]
+    )
+    quote_failure_reason = None
+    if quote_error is not None:
+        detail = " ".join(str(quote_error).split())
+        detail = re.sub(
+            r"(?i)\b(consumer[_ -]?(?:key|secret)|access[_ -]?token(?:[_ -]?secret)?|oauth[_ -]?token)\b\s*[:=]\s*[^,;\s]+",
+            r"\1=[redacted]",
+            detail,
+        )
+        detail = detail[:180]
+        quote_failure_reason = f"{type(quote_error).__name__}: {detail}" if detail else type(quote_error).__name__
+    lines = [
+        "**Manual SNPS stock-plan supplement** (outside API-covered accounts; not trade funding):",
+        *rows,
+        f"- Manual shares: **{fmt_qty(manual['total_shares'])} SNPS** across "
+        f"{len(manual['lots'])} owner-maintained lots. Estimated basis is unverified.",
+    ]
+    if price is None:
+        lines.append(
+            "- **Combined valuation/exposure incomplete:** no current SNPS price is present in "
+            "the API-covered holdings. Obtain a current quote with a date before drawing combined-portfolio "
+            "conclusions. The historical reference quote in the supplement is not used."
+        )
+        if quote_error is not None:
+            lines.append(f"- Quote lookup unavailable: {quote_failure_reason}.")
+    else:
+        manual_value = manual["total_shares"] * price
+        api_snps_value = sum(h.get("market_value") or 0.0 for h in api_snps)
+        combined_total = api_total + manual_value
+        combined_snps = api_snps_value + manual_value
+        identity.update({
+            "price": price,
+            "price_as_of": price_as_of.isoformat(),
+            "quote_price": quote_price,
+            "quote_timestamp": quote_timestamp.isoformat() if quote_timestamp else None,
+        })
+        lines.append(
+            f"- Price: **${price:,.2f}**, timestamped {price_as_of:%Y-%m-%d %H:%M %Z}. "
+            f"Manual value **{fmt_money(manual_value)}**."
+        )
+        lines.append(
+            f"- API-covered total **{fmt_money(api_total)}**; combined total including the manual "
+            f"shares **{fmt_money(combined_total)}**; combined SNPS exposure "
+            f"**{fmt_money(combined_snps)} ({combined_snps / combined_total * 100:.1f}%)**."
+        )
+    lines.append(
+        "- Keep broker reconciliation, account cash, and trade funding confined to API-covered accounts."
+    )
+    return "\n".join(lines), identity
 
 
 def format_owner_profile(context: dict) -> str:
@@ -650,6 +830,7 @@ def briefing_output_policy(
     today_observation: dict,
     prior_observation: dict | None,
     as_of: datetime,
+    context: dict | None = None,
 ) -> BriefingOutputPolicy:
     """Choose compact daily output or expanded decision-day output."""
     weight_changes = _changed_weight_symbols(today_snap, prior_snap)
@@ -662,16 +843,32 @@ def briefing_output_policy(
         current_breaches = {row["symbol"] for row in breaches}
         decision_day = decision_day or prior_breaches != current_breaches
 
-    previous_date = None
-    if prior_snap:
-        raw_date = prior_snap.get("date") or prior_snap.get("as_of")
+    requested_dates = []
+    state_path = BRIEFINGS_DIR / "candidate_refresh_state.json"
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        raw_date = state.get("last_requested") if isinstance(state, dict) else None
         if raw_date:
+            requested_dates.append(datetime.fromisoformat(str(raw_date)).date())
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        pass
+    if context is not None:
+        completed_dates = []
+        for record in context.get("candidate_review_history") or []:
+            if not isinstance(record, dict):
+                continue
+            raw_date = record.get("completed_at") or record.get("as_of")
             try:
-                previous_date = datetime.fromisoformat(str(raw_date)).date()
-            except ValueError:
-                previous_date = None
-    gap = (as_of.date() - previous_date).days if previous_date else None
-    refresh_candidates = first_run or (gap is not None and gap >= 7) or decision_day
+                completed_dates.append(datetime.fromisoformat(str(raw_date)).date())
+            except (TypeError, ValueError):
+                continue
+        requested_dates.extend(completed_dates)
+    last_requested = max(requested_dates) if requested_dates else None
+    days_since_request = (as_of.date() - last_requested).days if last_requested else None
+    # Keep same-day rebuilds useful: each saved briefing that requests a refresh
+    # still carries the request, while its date remains the cadence anchor.
+    weekly_due = last_requested is None or days_since_request == 0 or days_since_request >= 7
+    refresh_candidates = first_run or weekly_due or decision_day
     required = must_analyze_holdings(
         holdings, {row["symbol"] for row in harvest_reviews}
     )
@@ -890,9 +1087,28 @@ def build_briefing(
     as_of: datetime,
     portfolio_block: str,
     results=None,
+    live_build: bool = False,
 ) -> BriefingBuildResult:
     policy = active_policy()
     context, context_status = load_portfolio_context()
+    manual = load_manual_holdings()
+    quote = None
+    quote_error = None
+    has_api_snps_price = any(
+        (holding.get("symbol") or "").upper() == "SNPS"
+        and (holding.get("price") or 0) > 0
+        for result in results or []
+        for holding in result.get("holdings") or []
+    )
+    if (live_build and manual and not _manual_is_api_covered(manual, results)
+            and not has_api_snps_price):
+        try:
+            quote = fetch_snps_quote()
+        except Exception as exc:
+            quote_error = exc
+    manual_supplement_block, manual_identity = format_manual_supplement(
+        manual, results, grand_total, as_of, quote=quote, quote_error=quote_error
+    )
     as_of_str = as_of.strftime("%Y-%m-%d %H:%M")
     direct_members = "+".join(policy.sleeves["direct_ai_semi"])
     broad_members = "+".join(policy.sleeves["broad_ai_cycle"])
@@ -1013,7 +1229,16 @@ def build_briefing(
         today_observation,
         prior_observation,
         as_of,
+        context,
     )
+    if manual_identity["coverage"] == "manual" and "SNPS" not in output_policy.material_symbols:
+        output_policy = replace(
+            output_policy,
+            material_symbols=tuple(sorted((*output_policy.material_symbols, "SNPS"))),
+            focus_reasons=(*output_policy.focus_reasons, (
+                "SNPS", ("manual stock-plan holding outside API-covered accounts",)
+            )),
+        )
     snapshot_coverage = _snapshot_coverage(as_of, prior_snap, prior_label)
     constraint_math = format_constraint_math(holdings, grand_total, cluster_mv)
     marginal_10k = format_marginal_10k(
@@ -1056,7 +1281,19 @@ def build_briefing(
         candidate_instruction = "No new ideas today; the focus names come first."
         candidate_output = "Write **No candidate review today**."
 
-    briefing_id = make_briefing_id(as_of, today_snap)
+    briefing_id = make_briefing_id(
+        as_of,
+        today_snap,
+        {
+            "as_of": as_of.isoformat(),
+            "portfolio_sha256": sha256(portfolio_block.encode("utf-8")).hexdigest(),
+            "policy": _canonical_identity(vars(policy)),
+            "context": context,
+            "manual_supplement": manual_identity,
+            "weights": today_snap,
+            "observations": today_observation,
+        },
+    )
     prompt = render_prompt_template(
         briefing_id=briefing_id,
         output_mode=output_policy.mode,
@@ -1075,6 +1312,7 @@ def build_briefing(
         cash_value=fmt_money(cash_mv),
         cash_weight=fmt_weight(cash_w),
         cash_components=cash_components,
+        manual_supplement_block=manual_supplement_block,
         daily_delta=daily_delta,
         observed_delta=observed_delta,
         observable_review_block=observable_review_block,
@@ -1117,9 +1355,11 @@ def build_briefing(
             # A frozen copy written with this sidecar: get_portfolio.py re-runs
             # overwrite portfolio_<date>.txt, and a reply must be checked against
             # the exact data its prompt showed.
-            "portfolio_file": f"briefing_{as_of:%Y-%m-%d}_portfolio.txt",
+            "portfolio_file": f"briefing_{briefing_id}_portfolio.txt",
             "focus_symbols": [symbol for symbol, _reasons in output_policy.focus_reasons],
             "monitor_symbols": list(output_policy.monitor_symbols),
+            "candidate_refresh_requested": output_policy.refresh_candidates,
+            "manual_supplement": manual_identity,
         },
     )
 
@@ -1145,18 +1385,28 @@ def save_briefing_result(
     save_portfolio_block(portfolio_block, as_of=as_of)
     OUT_DIR.mkdir(exist_ok=True)
     date_str = as_of.strftime("%Y-%m-%d")
-    dated = OUT_DIR / f"daily_briefing_prompt_{date_str}.md"
+    briefing_id = (result.meta or {}).get("briefing_id") or date_str
+    dated = OUT_DIR / f"daily_briefing_prompt_{briefing_id}.md"
+    date_pointer = OUT_DIR / f"daily_briefing_prompt_{date_str}.md"
     latest = OUT_DIR / "daily_briefing_prompt_latest.md"
     atomic_write_text(dated, result.prompt)
+    atomic_write_text(date_pointer, result.prompt)
     atomic_write_text(latest, result.prompt)
     if result.meta and PORTABLE_BEGIN in portfolio_block:
         BRIEFINGS_DIR.mkdir(exist_ok=True)
         atomic_write_text(BRIEFINGS_DIR / result.meta["portfolio_file"], portfolio_block + "\n")
         meta_text = json.dumps(result.meta, indent=2)
+        atomic_write_text(BRIEFINGS_DIR / f"briefing_{briefing_id}.json", meta_text)
         atomic_write_text(BRIEFINGS_DIR / f"briefing_{date_str}.json", meta_text)
         atomic_write_text(BRIEFINGS_DIR / "briefing_latest.json", meta_text)
-    save_weights_snapshot(result.weights_snapshot, as_of, BRIEFINGS_DIR)
-    save_observation_snapshot(result.observation_snapshot, as_of, BRIEFINGS_DIR)
+    save_weights_snapshot(result.weights_snapshot, as_of, BRIEFINGS_DIR, briefing_id)
+    save_observation_snapshot(result.observation_snapshot, as_of, BRIEFINGS_DIR, briefing_id)
+    if (result.meta or {}).get("candidate_refresh_requested"):
+        BRIEFINGS_DIR.mkdir(exist_ok=True)
+        atomic_write_text(
+            BRIEFINGS_DIR / "candidate_refresh_state.json",
+            json.dumps({"last_requested": date_str, "briefing_id": briefing_id}, indent=2),
+        )
     return dated, latest
 
 
@@ -1198,6 +1448,7 @@ def main(argv=None) -> int:
 
 
 def _run(args, parser) -> int:
+    live_build = False
     if args.from_clipboard or args.input_file:
         if args.allow_partial:
             parser.error("--allow-partial is only available for live fetching")
@@ -1221,6 +1472,7 @@ def _run(args, parser) -> int:
             )
             return 3
     else:
+        live_build = True
         print("Fetching live E*TRADE portfolio...")
         formatted, grand_total, npos, results, as_of = fetch_portfolio_block(
             verbose=True, allow_partial=args.allow_partial
@@ -1232,7 +1484,8 @@ def _run(args, parser) -> int:
 
     holdings, accounts = consolidate(results, grand_total)
     result = build_briefing(
-        holdings, accounts, grand_total, as_of, formatted, results=results
+        holdings, accounts, grand_total, as_of, formatted, results=results,
+        live_build=live_build,
     )
     dated, latest = save_briefing_result(result, formatted, as_of)
 

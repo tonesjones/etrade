@@ -19,6 +19,38 @@ from etrade_auth import update_env_tokens
 ET = ZoneInfo("America/New_York")
 
 
+class PartialReportCliTests(unittest.TestCase):
+    def test_cash_includes_reported_margin_debit(self):
+        balance = {"BalanceResponse": {
+            "Cash": {"moneyMktBalance": 1155.08},
+            "Computed": {"cashBalance": 0, "marginBalance": -1082.939777,
+                         "netCash": 484055.529223},
+        }}
+        self.assertAlmostEqual(
+            portfolio.parse_account_cash(balance, account_mode="MARGIN"),
+            72.140223,
+        )
+
+    def test_partial_cli_saves_text_without_replacing_complete_report(self):
+        as_of = datetime(2026, 10, 7, 12, tzinfo=ET)
+        formatted = "**INCOMPLETE DATA — do not use for trade sizing.**\nFailed account"
+        results = [{"error": "valuation mismatch"}]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "briefings").mkdir()
+            latest = root / "briefings" / "portfolio_latest.txt"
+            latest.write_text("complete report", encoding="utf-8")
+            with patch.object(portfolio, "PROJECT_ROOT", root), patch.object(
+                portfolio, "fetch_portfolio_block",
+                return_value=(formatted, 0, 0, results, as_of),
+            ), patch.object(portfolio, "copy_to_clipboard") as clipboard, patch("builtins.print"):
+                self.assertEqual(portfolio.main(["--allow-partial"]), 0)
+            partial = root / "briefings" / "portfolio_partial_2026-10-07.txt"
+            self.assertEqual(partial.read_text(encoding="utf-8"), formatted + "\n")
+            self.assertEqual(latest.read_text(encoding="utf-8"), "complete report")
+            clipboard.assert_not_called()
+
+
 def _position(symbol: str, qty: float = 1.0, value: float = 10.0) -> dict:
     return {"Product": {"symbol": symbol}, "quantity": qty, "marketValue": value}
 
@@ -217,12 +249,16 @@ class PolicySwapTests(unittest.TestCase):
 class LiveFetchWiringTests(unittest.TestCase):
     """The live fetch must actually run the lot and reconciliation checks."""
 
-    accounts = {"AccountListResponse": {"Accounts": {"Account": {
-        "accountIdKey": "key", "accountStatus": "ACTIVE", "accountType": "INDIVIDUAL",
-    }}}}
-
-    def _fetch(self, position, total):
-        balance = {"BalanceResponse": {"Computed": {
+    def _fetch(self, position, total, *, account_mode=None, balance=None):
+        account = {
+            "accountIdKey": "key",
+            "accountStatus": "ACTIVE",
+            "accountType": "INDIVIDUAL",
+        }
+        if account_mode is not None:
+            account["accountMode"] = account_mode
+        accounts = {"AccountListResponse": {"Accounts": {"Account": account}}}
+        balance = balance or {"BalanceResponse": {"Computed": {
             "RealTimeValues": {"totalAccountValue": total}, "cashBalance": 0.0,
         }}}
         with (
@@ -230,7 +266,7 @@ class LiveFetchWiringTests(unittest.TestCase):
                 "get_portfolio.get_accounts_api",
                 return_value=(object(), {"account_id_key": None}),
             ),
-            patch("get_portfolio.list_accounts", return_value=self.accounts),
+            patch("get_portfolio.list_accounts", return_value=accounts),
             patch("get_portfolio.get_portfolio", return_value=_page([position])),
             patch("get_portfolio.get_account_balance", return_value=balance),
         ):
@@ -241,6 +277,63 @@ class LiveFetchWiringTests(unittest.TestCase):
                     "PositionLot": [{"remainingQty": 10, "marketValue": 1000.0, "termCode": 1}]}
         _text, total, *_ = self._fetch(position, 1000.0)
         self.assertEqual(total, 1000.0)
+
+    def test_live_fetch_passes_selected_account_type_and_mode_to_cash_parser(self):
+        position = {**_position("AMD", qty=10, value=1000.0),
+                    "PositionLot": [{"remainingQty": 10, "marketValue": 1000.0, "termCode": 1}]}
+        with patch("get_portfolio.parse_account_cash", return_value=0.0) as parse_cash:
+            self._fetch(position, 1000.0, account_mode="MARGIN")
+        self.assertEqual(parse_cash.call_args.kwargs["account_type"], "INDIVIDUAL")
+        self.assertEqual(parse_cash.call_args.kwargs["account_mode"], "MARGIN")
+
+    def test_live_fetch_margin_mode_applies_negative_debit(self):
+        position = {
+            **_position("AMD", qty=10, value=1000.0),
+            "PositionLot": [
+                {"remainingQty": 10, "marketValue": 1000.0, "termCode": 1}
+            ],
+        }
+        balance = {"BalanceResponse": {
+            "Cash": {"moneyMktBalance": 1155.08},
+            "Computed": {
+                "cashBalance": 0.0,
+                "marginBalance": -1082.939777,
+                "RealTimeValues": {"totalAccountValue": 1072.140223},
+            },
+        }}
+        _text, _total, _count, results, _as_of = self._fetch(
+            position,
+            1072.140223,
+            account_mode="MARGIN",
+            balance=balance,
+        )
+        cash = next(h for h in results[0]["holdings"] if h["symbol"] == "CASH")
+        self.assertAlmostEqual(cash["market_value"], 72.140223)
+
+    def test_live_fetch_cash_mode_ignores_negative_debit(self):
+        position = {
+            **_position("AMD", qty=10, value=1000.0),
+            "PositionLot": [
+                {"remainingQty": 10, "marketValue": 1000.0, "termCode": 1}
+            ],
+        }
+        balance = {"BalanceResponse": {
+            "Cash": {"moneyMktBalance": 1155.08},
+            "Computed": {
+                "cashBalance": 0.0,
+                "marginBalance": -1082.939777,
+                "RealTimeValues": {"totalAccountValue": 2155.08},
+            },
+        }}
+        with self.assertLogs(portfolio.LOGGER, "WARNING"):
+            _text, _total, _count, results, _as_of = self._fetch(
+                position,
+                2155.08,
+                account_mode="CASH",
+                balance=balance,
+            )
+        cash = next(h for h in results[0]["holdings"] if h["symbol"] == "CASH")
+        self.assertAlmostEqual(cash["market_value"], 1155.08)
 
     def test_lot_mismatch_stops_the_run(self):
         position = {**_position("AMD", qty=10, value=1000.0),
