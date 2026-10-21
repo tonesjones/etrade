@@ -19,6 +19,35 @@ from etrade_auth import update_env_tokens
 ET = ZoneInfo("America/New_York")
 
 
+class PartialReportCliTests(unittest.TestCase):
+    def test_cash_includes_reported_margin_debit(self):
+        balance = {"BalanceResponse": {
+            "Cash": {"moneyMktBalance": 1155.08},
+            "Computed": {"cashBalance": 0, "marginBalance": -1082.939777,
+                         "netCash": 484055.529223},
+        }}
+        self.assertAlmostEqual(portfolio.parse_account_cash(balance), 72.140223)
+
+    def test_partial_cli_saves_text_without_replacing_complete_report(self):
+        as_of = datetime(2026, 10, 7, 12, tzinfo=ET)
+        formatted = "**INCOMPLETE DATA — do not use for trade sizing.**\nFailed account"
+        results = [{"error": "valuation mismatch"}]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "briefings").mkdir()
+            latest = root / "briefings" / "portfolio_latest.txt"
+            latest.write_text("complete report", encoding="utf-8")
+            with patch.object(portfolio, "PROJECT_ROOT", root), patch.object(
+                portfolio, "fetch_portfolio_block",
+                return_value=(formatted, 0, 0, results, as_of),
+            ), patch.object(portfolio, "copy_to_clipboard") as clipboard, patch("builtins.print"):
+                self.assertEqual(portfolio.main(["--allow-partial"]), 0)
+            partial = root / "briefings" / "portfolio_partial_2026-10-07.txt"
+            self.assertEqual(partial.read_text(encoding="utf-8"), formatted + "\n")
+            self.assertEqual(latest.read_text(encoding="utf-8"), "complete report")
+            clipboard.assert_not_called()
+
+
 def _position(symbol: str, qty: float = 1.0, value: float = 10.0) -> dict:
     return {"Product": {"symbol": symbol}, "quantity": qty, "marketValue": value}
 

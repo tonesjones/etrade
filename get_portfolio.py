@@ -1034,7 +1034,7 @@ def _direct_numeric(value, *keys) -> float | None:
 
 
 def parse_account_cash(resp: dict) -> float | None:
-    """Settled cash + money-market sweep from the balance payload, or None if absent."""
+    """Cash plus sweep and signed margin balance, or None if absent."""
     if not isinstance(resp, dict) or "BalanceResponse" not in resp:
         return None
     balance = resp["BalanceResponse"]
@@ -1048,7 +1048,9 @@ def parse_account_cash(resp: dict) -> float | None:
     if mmkt is None:
         mmkt = _direct_numeric(cash_obj, "moneyMktBalance")
     if cash_balance is not None or mmkt is not None:
-        return (cash_balance or 0.0) + (mmkt or 0.0)
+        # The sweep alone overstates equity when a reported margin debit offsets it.
+        margin_balance = _direct_numeric(computed, "marginBalance")
+        return (cash_balance or 0.0) + (mmkt or 0.0) + (margin_balance or 0.0)
 
     net_cash = _direct_numeric(computed, "netCash")
     if net_cash is None:
@@ -1442,9 +1444,9 @@ def fetch_portfolio_block(verbose: bool = True, allow_partial: bool = False):
         try:
             raw = get_portfolio(key, accounts_api)
             holdings, position_total = extract_holdings(raw)
+            balance_raw = get_account_balance(key, a.get("accountType") or "", accounts_api)
             attach_lots(accounts_api, holdings, verbose=verbose, strict=True)
             check_lot_quantities(label, holdings)
-            balance_raw = get_account_balance(key, a.get("accountType") or "", accounts_api)
             total = parse_account_balance(balance_raw)
             apply_cash_lot(
                 holdings,
@@ -1546,6 +1548,17 @@ def main(argv=None) -> int:
     except AuthExpiredError as exc:
         print(f"\n{exc}", file=sys.stderr)
         return 2
+    if any(result.get("error") for result in _results):
+        out_dir = PROJECT_ROOT / "briefings"
+        out_dir.mkdir(exist_ok=True)
+        path = out_dir / f"portfolio_partial_{as_of.strftime('%Y-%m-%d')}.txt"
+        atomic_write_text(path, formatted + "\n")
+        print()
+        print(formatted)
+        print(f"\nSaved incomplete report: {path}")
+        print("Complete portfolio_latest.txt retained; clipboard not updated.")
+        print("Partial report is for inspection only; offline briefing requires complete data.")
+        return 0
     portable = format_portable_portfolio_text(formatted, _results, as_of)
     path = save_portfolio_block(portable, as_of=as_of)
     clipped = copy_to_clipboard(portable)
