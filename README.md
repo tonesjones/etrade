@@ -8,7 +8,7 @@ Each holding in the prompt carries E\*TRADE's price paid, cost per share, total 
 
 ## Set up once
 
-1. Create a virtual environment and install the dependencies. `briefing.cmd` expects the environment at `.venv`.
+1. Create a virtual environment and install the dependencies. `daily.cmd` and `briefing.cmd` expect the environment at `.venv`.
 
    ```powershell
    cd path\to\etrade-briefings
@@ -31,60 +31,59 @@ Each holding in the prompt carries E\*TRADE's price paid, cost per share, total 
    ETRADE_DEV=false
    ```
 
-4. Authorize the app. You repeat this step every day, as described in [Daily workflow](#daily-workflow).
-
-   ```powershell
-   python etrade_auth.py
-   ```
+4. Run `.\daily.cmd` as described in [Daily workflow](#daily-workflow). It prompts you to authorize the app when needed.
 
 The scripts pull every active account by default. To pull one account only, set `ETRADE_ACCOUNT_ID_KEY` in `.env`.
 
 ## Daily workflow
 
-To run steps 1 and 2 with one command, run:
+### 1. Build the live briefing
+
+Run this command from PowerShell in the project folder:
 
 ```powershell
 .\daily.cmd
 ```
 
-`daily.cmd` runs `etrade_auth.py` only when today's Eastern-date token is missing. It then builds the live prompt and copies it to the clipboard. If authorization or the build fails, it stops and leaves the clipboard unchanged.
-
-### 1. Re-authorize after midnight Eastern
-
-E\*TRADE access tokens expire at midnight US Eastern. This is an E\*TRADE rule, and the project can't work around it. Your consumer key and secret stay in `.env`. Only the access token pair needs refreshing.
-
-```powershell
-python etrade_auth.py
-```
+`daily.cmd` uses the project's `.venv` interpreter. If either access token is missing or `ETRADE_AUTH_DATE` is not today's US Eastern date, it starts authorization:
 
 1. Open the URL that the script prints, log in, and authorize the app.
 2. Paste the verification code into the terminal.
 
-The script writes the two token entries and `ETRADE_AUTH_DATE` to `.env` in one atomic update. It doesn't print the token values.
+Authorization saves the access token pair and `ETRADE_AUTH_DATE` to `.env` without printing the token values. The launcher reloads those values, builds the live prompt, and copies it to the clipboard. Later runs on the same Eastern day reuse the saved tokens.
 
-Later runs on the same Eastern day don't need a new login. If E\*TRADE rejects the tokens, or `ETRADE_AUTH_DATE` is from an earlier Eastern day, the scripts stop and tell you to run `etrade_auth.py` again.
+If authorization or the build fails, the launcher stops. A failed run leaves the clipboard unchanged, so don't send its existing contents as a new briefing.
 
-### 2. Build the briefing prompt
+E\*TRADE access tokens expire at midnight US Eastern. If E\*TRADE rejects tokens dated today, authorize again and rerun the launcher:
 
 ```powershell
-python build_briefing_prompt.py
+.\.venv\Scripts\python.exe etrade_auth.py
+.\daily.cmd
 ```
 
-The script copies the prompt to your clipboard. Open your model in a fresh chat, press **Ctrl+V**, and send.
+### 2. Send the prompt to a model
 
-You can also build the prompt without contacting E\*TRADE. Run `get_portfolio.py` first, because it copies the portfolio and an embedded JSON payload to the clipboard. Then run the shortcut:
+Open a fresh chat in a model with web search, paste the prompt with **Ctrl+V**, and send it.
+
+#### Build manually or from saved data
+
+If your virtual environment is active and today's tokens are valid, `python build_briefing_prompt.py` builds the live prompt directly.
+
+For an offline build, use a portfolio dump you saved earlier. To create a dump, run `python get_portfolio.py` with valid tokens. That command contacts E\*TRADE, saves the portfolio, and copies it with an embedded JSON payload to the clipboard. Then run:
 
 ```powershell
 .\briefing.cmd
 ```
 
-`briefing.cmd` runs `build_briefing_prompt.py --from-clipboard` with the `.venv` interpreter. The offline build validates the versioned JSON payload and refuses older text-only dumps, because those dumps don't keep exact account and lot identity. It also refuses input older than 24 hours unless you pass `--allow-stale`.
+`briefing.cmd` builds the prompt from the clipboard without contacting E\*TRADE. It validates the JSON payload and rejects older text-only dumps that lack exact account and lot identity. Offline input older than 24 hours requires `--allow-stale`.
 
-If another program replaced your clipboard, build from the saved portfolio file instead:
+If another program replaced the clipboard, build from the saved portfolio file instead:
 
 ```powershell
 python build_briefing_prompt.py --input-file .\briefings\portfolio_YYYY-MM-DD.txt
 ```
+
+The `python` commands in this README assume you activated `.venv`. The `.cmd` launchers select that environment themselves.
 
 ### 3. Import the model's reply
 
@@ -96,7 +95,9 @@ python import_response.py --engine codex --from-clipboard
 
 Set `--engine` to the model you used: `codex`, `claude`, `chatgpt`, `grok`, or `other`. To import from a file, use `--input-file reply.md` in place of `--from-clipboard`.
 
-The importer checks the reply against the exact portfolio data that the prompt was built from:
+The importer reads the reply's `briefing_id` to select the saved portfolio for that prompt, even if you built another prompt afterward. Use `--briefing-id ID` to select it explicitly. A date alone is ambiguous when several briefings exist for that day.
+
+The importer checks the reply against that portfolio:
 
 - The reply answers every focus name.
 - Every ticker and account exists.
@@ -121,7 +122,7 @@ If the copy dropped the code fences, the importer still finds the last JSON obje
 
 ### 4. Compare two models (optional)
 
-Paste the same prompt into two models in fresh chats, and import each reply with its own `--engine`. A trade that both models propose is a stronger signal. Where they disagree, compare the reasoning and the tax impact in each `responses/*.json` file.
+Paste the same prompt into two models in fresh chats, and import each reply with its own `--engine`. Compare their sources, reasoning, and the tax impact in each `responses/*.json` file. Agreement between models is not independent evidence that a trade is suitable.
 
 ### Run the workflow from Claude Code
 
@@ -141,6 +142,7 @@ After you pull, rebuild the prompt before you send it, so the model's reply matc
 
 | Command | Output |
 |---------|--------|
+| `daily.cmd` | Saves refreshed tokens to `.env` when needed, then writes the same outputs as the live prompt build. |
 | `build_briefing_prompt.py` | Prompt to the clipboard and `prompts/`. Writes `briefings/weights_*.json` (portfolio delta) and `briefings/observations_*.json` (account, quantity, and lot reconciliation). |
 | `briefing.cmd` | The same outputs, built offline from the clipboard payload. |
 | `get_portfolio.py` | Full per-account dump with cost, P/L, and ST or LT status, to the clipboard and `briefings/portfolio_YYYY-MM-DD.txt`. For diagnostics and offline builds. Don't paste it into the model. |
@@ -184,7 +186,7 @@ The briefing math and most of the prompt's instructions read `portfolio_policy.j
 | `harvest_loss_dollars` | Taxable unrealized-loss flag. Use a negative number. |
 | `risk_off_glide_pct` | Direct-sleeve weight to work toward in Risk-Off, using tax-aware lots. |
 | `st_gain_flag_dollars`, `lt_gain_flag_dollars` | Taxable short-term and long-term unrealized-gain flags in the tax section. |
-| `cash_symbols` | Tickers treated as cash. Any symbol that contains `GOVERNMENT` also counts as cash. |
+| `cash_symbols` | Cash equivalents for portfolio classification and weights. Names containing `GOVERNMENT` also count. Trade funding uses actual `CASH` or a named same-account sale. |
 | `sleeves` | Sleeve membership. The direct AI and semiconductor sleeve is a subset of the broad AI-cycle sleeve. A membership change updates both the math and the prompt labels. |
 | `aliases` | Optional display names, for example `CRWV` shown as CoreWeave. |
 | `marginal_examples` | Rows in the $10k example table. Set `symbol` to `null` for a generic diversifier. |
@@ -244,15 +246,17 @@ The local output is your real portfolio: dollar values, cost basis, lots, and th
 - Never run `git add -f` on an ignored file. Commit only `.env.example`, with placeholders.
 - Never hard-code API keys.
 - Keep the GitHub repository private.
-- Don't send `briefings/` or `prompts/` by email, a public gist, or a cloud chat. The model you paste into sees the full prompt. That exposure is the workflow, not a leak.
+- Share the prompt only with a model service you trust to receive your portfolio data. Keep generated files out of public gists and other unintended destinations.
 - `etrade_auth.py` saves tokens to `.env` without printing them. Pass `--no-write-env` with `--print-tokens` only when you need to handle tokens by hand.
-- The OAuth tokens could authorize E\*TRADE's trading APIs. This code never calls an order endpoint. It uses only the OAuth login, `list_accounts`, and `get_account_portfolio`.
+- The OAuth tokens could authorize E\*TRADE's trading APIs. This code never calls an order endpoint. It uses OAuth login and read-only account, position, tax-lot, balance, and quote requests.
 
 ## Files
 
 | File | Purpose |
 |------|---------|
-| `build_briefing_prompt.py` | Daily command. Builds the prompt from live data or a saved portfolio. |
+| `daily.cmd` | Daily launcher. Authorizes when needed, then builds the live prompt. |
+| `daily_briefing.py` | Runs authorization and the live build for `daily.cmd`. |
+| `build_briefing_prompt.py` | Builds the prompt from live data or a saved portfolio. |
 | `briefing.cmd` | Offline build from the clipboard payload. |
 | `get_portfolio.py` | Portfolio dump with cost, P/L, and ST or LT status. |
 | `import_response.py` | Validates a model reply against the briefing's portfolio data and saves it. |

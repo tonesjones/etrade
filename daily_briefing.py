@@ -29,6 +29,8 @@ def main() -> int:
         if auth.returncode:
             print("Daily authorization failed; no briefing was built.", file=sys.stderr)
             return auth.returncode
+        # Authorization updates the file in a child; refresh what the build inherits.
+        load_dotenv(ENV_PATH, override=True)
     build = subprocess.run([sys.executable, str(ENV_PATH.parent / "build_briefing_prompt.py")])
     if build.returncode:
         print(
