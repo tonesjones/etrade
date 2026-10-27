@@ -99,24 +99,15 @@ Cite every fact with its source and publication date, and prefer company release
 **6. Actions JSON.** End with exactly one fenced `json` block and nothing after it. A script checks it against the account data, so use tickers, account tails (for example `…1234`), lot dates, and share quantities exactly as shown above:
 
 ```json
-{{
-  "briefing_id": "{briefing_id}",
-  "web_research": true,
-  "candidate_review_completed": false,
-  "names": [
-    {{"ticker": "XYZ", "view": "ATTRACTIVE | NEUTRAL | UNATTRACTIVE | INSUFFICIENT_EVIDENCE",
-      "action": "KEEP | REDUCE | REPLACE | DEPLOY | NO_ACTION",
-      "sources": [{{"url": "https://...", "date": "YYYY-MM-DD"}}],
-      "trigger": "observable condition"}}
-  ],
-  "trades": [
-    {{"id": "t1", "side": "SELL | BUY", "account": "…1234", "ticker": "XYZ",
-      "quantity": 10, "lot_acquired": "YYYY-MM-DD or null", "est_price": null,
-      "funded_by": "CASH | SGOV | t1"}}
-  ]
-}}
+{{"briefing_id": "{briefing_id}", "web_research": true, "candidate_review_completed": false,
+"names": [
+{{"ticker": "XYZ", "view": "ATTRACTIVE | NEUTRAL | UNATTRACTIVE | INSUFFICIENT_EVIDENCE", "action": "KEEP | REDUCE | REPLACE | DEPLOY | NO_ACTION", "sources": [{{"url": "https://...", "date": "YYYY-MM-DD"}}], "trigger": "observable condition, under 15 words"}}
+],
+"trades": [
+{{"id": "t1", "side": "SELL | BUY", "account": "…1234", "ticker": "XYZ", "quantity": 10, "lot_acquired": "YYYY-MM-DD or null", "est_price": null, "funded_by": "CASH | SGOV | t1"}}
+]}}
 ```
 
-One `names` entry per focus name. Set `candidate_review_completed` to true only when this prompt requested a candidate refresh and you actually completed section 3 with current research; otherwise leave it false. `trades` is `[]` unless you propose REDUCE, REPLACE, or DEPLOY. A SELL in a taxable account must give `lot_acquired`; use one trade per lot. Give `est_price` only for a BUY of a ticker not in the holdings table. Set `web_research` to false if you could not search.
+Write the block compactly, exactly in this layout: no indentation, one line per `names` entry and one line per trade. Use one source per name, the most recent primary one, with a short URL. One `names` entry per focus name. Set `candidate_review_completed` to true only when this prompt requested a candidate refresh and you actually completed section 3 with current research; otherwise leave it false. `trades` is `[]` unless you propose REDUCE, REPLACE, or DEPLOY. A SELL in a taxable account must give `lot_acquired`; use one trade per lot. Give `est_price` only for a BUY of a ticker not in the holdings table. Set `web_research` to false if you could not search.
 
 Keep a routine day under 1,000 words. Go longer only when proposing a trade or reporting material news.
