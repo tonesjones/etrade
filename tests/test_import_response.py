@@ -1,5 +1,6 @@
 import io
 import json
+import os
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -105,6 +106,11 @@ class ImportResponseTests(unittest.TestCase):
             patcher = patch.object(imp, target, value)
             patcher.start()
             self.addCleanup(patcher.stop)
+        # Keep tests from writing notes into the owner's real vault folder from .env.
+        env = patch.dict(os.environ)
+        env.start()
+        self.addCleanup(env.stop)
+        os.environ.pop("ETRADE_VAULT_BRIEFINGS_DIR", None)
         self.write_briefing(fixture_text())
 
     def write_briefing(self, portfolio_text: str) -> None:

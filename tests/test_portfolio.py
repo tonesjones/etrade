@@ -485,7 +485,7 @@ class BriefingPolicyTests(unittest.TestCase):
         self.assertIn("**Candidate refresh:** no", prompt)
         self.assertNotIn("Refresh the candidate list.", prompt)
 
-    def test_decision_prompt_refreshes_candidates_after_weight_change(self):
+    def test_weight_change_makes_a_decision_day(self):
         as_of = datetime(2026, 9, 18, 16, 0, tzinfo=ET)
         prior_as_of = datetime(2026, 9, 17, 16, 0, tzinfo=ET)
         holding = consolidated("AMD", 100_000.0, 100.0, **AMD_ONLY)
@@ -523,7 +523,6 @@ class BriefingPolicyTests(unittest.TestCase):
             as_of,
         )
         self.assertEqual(policy.mode, "DECISION DAY")
-        self.assertTrue(policy.refresh_candidates)
         self.assertIn("AMD", policy.material_symbols)
 
     def test_harvest_flag_uses_policy_cutoff(self):

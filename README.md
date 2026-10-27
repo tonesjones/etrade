@@ -87,13 +87,23 @@ The `python` commands in this README assume you activated `.venv`. The `.cmd` la
 
 ### 3. Import the model's reply
 
-The prompt asks the model to end its reply with a fenced `json` block of proposed actions. Copy the whole reply with the message's copy button, then run:
+The prompt asks the model to end its reply with a fenced `json` block of proposed actions. The importer reads that block. You don't send it to another model.
+
+Copy the whole reply with the message's copy button, then run:
 
 ```powershell
-python import_response.py --engine codex --from-clipboard
+.\reply.cmd
 ```
 
-Set `--engine` to the model you used: `codex`, `claude`, `chatgpt`, `grok`, or `other`. To import from a file, use `--input-file reply.md` in place of `--from-clipboard`.
+`reply.cmd` imports a ChatGPT reply from the clipboard. For another model, name its engine: `.\reply.cmd codex`. The engines are `codex`, `claude`, `chatgpt`, `grok`, and `other`. To import from a file, run `python import_response.py --engine chatgpt --input-file reply.md`.
+
+To save each reply as a note in your Obsidian vault, set `ETRADE_VAULT_BRIEFINGS_DIR` in `.env` to a folder that git ignores, for example a `95 Private` folder:
+
+```env
+ETRADE_VAULT_BRIEFINGS_DIR=C:\path\to\Vault\95 Private\Etrade\Briefings
+```
+
+The importer then writes `YYYY-MM-DD <engine>.md` to that folder for every import, accepted or rejected. The note holds the import result, a link to the previous note, and the full reply. The note contains real portfolio data, so the importer refuses a folder inside a git repository that doesn't ignore it. `--vault-dir PATH` overrides the setting for one run.
 
 The importer reads the reply's `briefing_id` to select the saved portfolio for that prompt, even if you built another prompt afterward. Use `--briefing-id ID` to select it explicitly. A date alone is ambiguous when several briefings exist for that day.
 
@@ -146,14 +156,15 @@ After you pull, rebuild the prompt before you send it, so the model's reply matc
 | `build_briefing_prompt.py` | Prompt to the clipboard and `prompts/`. Writes `briefings/weights_*.json` (portfolio delta) and `briefings/observations_*.json` (account, quantity, and lot reconciliation). |
 | `briefing.cmd` | The same outputs, built offline from the clipboard payload. |
 | `get_portfolio.py` | Full per-account dump with cost, P/L, and ST or LT status, to the clipboard and `briefings/portfolio_YYYY-MM-DD.txt`. For diagnostics and offline builds. Don't paste it into the model. |
-| `import_response.py` | `responses/YYYY-MM-DD_<engine>.md` and `.json`, with the checks, computed trades, and weights. |
+| `import_response.py` | `responses/YYYY-MM-DD_<engine>.md` and `.json`, with the checks, computed trades, and weights. A vault note when `ETRADE_VAULT_BRIEFINGS_DIR` is set. |
+| `reply.cmd` | The same outputs as `import_response.py`, from a reply on the clipboard. |
 
 ## What the prompt asks the model to do
 
 The prompt asks for decision support, not a holdings summary. It assumes a model with web search. The model has no trading authority, and its output is a proposal, not an approved trade. The model must:
 
 - Research first. For each focus name, find dated news since the last snapshot. Check the market backdrop, and scan the monitor-only names for material events. "No material news" counts as a finding.
-- Work from one focus list. Each focus name carries its reason: a limit breach, a taxable loss to review, a weight or position change, or size and loss on a decision day. Other sized holdings are monitor-only.
+- Work from one focus list. Each focus name carries its reason: a limit breach, a taxable loss to review, a weight or position change, or size and loss on a decision day. The list holds at most `max_focus_names` names, ranked by reason and then by value. Names past the cap and other sized holdings are monitor-only.
 - Give each focus name a fundamental view and, separately, one portfolio action: `KEEP`, `REDUCE`, `REPLACE`, `DEPLOY`, or `NO ACTION`. `NO ACTION` requires a named missing fact that would change the decision.
 - Treat a soft concentration breach as "review and don't add", not as an automatic sale. Any cut for a limit starts from the computed smallest dollar cut.
 - Name the account and the exact taxable lot for every sale, and respect wash-sale rules on taxable losses.
@@ -169,6 +180,8 @@ The prompt includes two deltas against the previous pull:
 
 The account delta shows that holdings changed. It doesn't prove a buy or a sale, because transfers, splits, and other corporate actions also change positions. It also doesn't show why a holding changed, or whether you acted on a model's proposal. The prompt marks earlier proposals `NOT CAPTURED` unless your decision history records them.
 
+A position worth less than `analyze_market_value_floor` on both days doesn't count as a change, so it can't turn a routine day into a decision day. The account delta still lists it.
+
 The deltas compare against the most recent earlier calendar day, not an earlier run on the same day. They need a previous `briefings/weights_*.json` or dated prompt.
 
 ## Change the decision policy
@@ -183,6 +196,7 @@ The briefing math and most of the prompt's instructions read `portfolio_policy.j
 | `analyze_weight_floor_pct` | Names at or above this weight must appear in the position table. |
 | `analyze_market_value_floor` | Minimum market value before a harvest or material-loss name must appear in the table. |
 | `material_loss_dollars`, `material_loss_pct` | A sized name past either loss threshold stays in the table, even under the weight floor. |
+| `max_focus_names` | Optional. Most names the prompt asks the model to analyze in full. Defaults to 8. The manual `SNPS` entry is added on top. |
 | `harvest_loss_dollars` | Taxable unrealized-loss flag. Use a negative number. |
 | `risk_off_glide_pct` | Direct-sleeve weight to work toward in Risk-Off, using tax-aware lots. |
 | `st_gain_flag_dollars`, `lt_gain_flag_dollars` | Taxable short-term and long-term unrealized-gain flags in the tax section. |
@@ -210,7 +224,7 @@ To give the model context that E\*TRADE can't supply, copy `portfolio_context.ex
 
 The prompt reports a blank owner profile as "not supplied", and the model flags a missing field only where it would change a trade. Without research notes, the model researches each focus name itself. Update the notes after earnings or a material event.
 
-The prompt asks for a candidate review (new places to put cash) on the first run, on any decision day, and when seven days have passed since the last requested review. The build saves the request date in `briefings/candidate_refresh_state.json`, so the weekly review works whether or not you import replies.
+The prompt asks for a candidate review (new places to put cash) on the first run and when seven days have passed since the last requested review. The build saves the request date in `briefings/candidate_refresh_state.json`, so the weekly review works whether or not you import replies.
 
 ## Include stock-plan shares that the API doesn't return
 
@@ -260,6 +274,8 @@ The local output is your real portfolio: dollar values, cost basis, lots, and th
 | `briefing.cmd` | Offline build from the clipboard payload. |
 | `get_portfolio.py` | Portfolio dump with cost, P/L, and ST or LT status. |
 | `import_response.py` | Validates a model reply against the briefing's portfolio data and saves it. |
+| `reply.cmd` | Imports a reply from the clipboard. |
+| `vault_notes.py` | Writes the vault note for an imported reply. |
 | `etrade_auth.py` | OAuth login and atomic `.env` token update. |
 | `templates/briefing_prompt.md` | Prompt wording, with `{placeholders}`. |
 | `briefing_snapshots.py` | Daily weight and observation snapshots, and the two deltas. |

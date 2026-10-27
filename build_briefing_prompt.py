@@ -104,6 +104,7 @@ class BriefingOutputPolicy:
     # Why each material symbol is in focus, and the sized names that are only monitored.
     focus_reasons: tuple[tuple[str, tuple[str, ...]], ...] = ()
     monitor_symbols: tuple[str, ...] = ()
+    deferred_focus_reasons: tuple[tuple[str, tuple[str, ...]], ...] = ()
 
 # User-editable decision policy (portfolio_policy.json).
 
@@ -814,9 +815,16 @@ def format_focus_block(output_policy: BriefingOutputPolicy) -> str:
         for symbol, reasons in output_policy.focus_reasons
     ] or ["- None today. Scan the monitor names only."]
     if output_policy.monitor_symbols:
+        deferred = dict(output_policy.deferred_focus_reasons)
+        monitor = [symbol for symbol in output_policy.monitor_symbols if symbol not in deferred]
+        parts = [", ".join(monitor)] if monitor else []
+        if deferred:
+            parts.append("deferred from focus today: " + ", ".join(
+                f"{symbol} ({'; '.join(reasons)})" for symbol, reasons in deferred.items()
+            ))
         lines.append(
             "\n**Monitor only** (no write-up unless research finds a material, "
-            "company-specific event): " + ", ".join(output_policy.monitor_symbols)
+            "company-specific event): " + "; ".join(parts)
         )
     return "\n".join(lines)
 
@@ -868,42 +876,49 @@ def briefing_output_policy(
     # Keep same-day rebuilds useful: each saved briefing that requests a refresh
     # still carries the request, while its date remains the cadence anchor.
     weekly_due = last_requested is None or days_since_request == 0 or days_since_request >= 7
-    refresh_candidates = first_run or weekly_due or decision_day
+    refresh_candidates = first_run or weekly_due
     required = must_analyze_holdings(
         holdings, {row["symbol"] for row in harvest_reviews}
     )
     reasons: dict[str, list[str]] = defaultdict(list)
+    priorities: dict[str, int] = {}
+
+    def add_reason(symbol: str, reason: str, priority: int) -> None:
+        if reason not in reasons[symbol]:
+            reasons[symbol].append(reason)
+        priorities[symbol] = min(priorities.get(symbol, priority), priority)
+
     cap = active_policy().single_name_cap_pct
     for row in breaches:
-        reasons[row["symbol"]].append(f"above {cap:g}% single-name limit")
+        add_reason(row["symbol"], f"above {cap:g}% single-name limit", 1)
     for row in harvest_reviews:
-        if "taxable loss review" not in reasons[row["symbol"]]:
-            reasons[row["symbol"]].append("taxable loss review")
+        add_reason(row["symbol"], "taxable loss review", 3)
     for symbol in sorted(weight_changes):
-        reasons[symbol].append("weight moved ≥ 0.5 pp since last snapshot")
+        add_reason(symbol, "weight moved ≥ 0.5 pp since last snapshot", 6)
     for symbol in sorted(observation_changes):
-        reasons[symbol].append("quantity or lot change since last snapshot")
+        add_reason(symbol, "quantity or lot change since last snapshot", 5)
     for h in holdings:
         if not is_cash_symbol(h["symbol"]) and cap - NEAR_LIMIT_PP <= h["weight"] <= cap:
-            reasons[h["symbol"]].append(f"within {NEAR_LIMIT_PP:g} pp of {cap:g}% single-name limit")
-    # Material losses stay in focus every day: a large loss can mean a broken thesis
-    # even where there is no tax angle. Size alone earns focus only on a decision day.
+            add_reason(h["symbol"], f"within {NEAR_LIMIT_PP:g} pp of {cap:g}% single-name limit", 2)
+    # Losses qualify every day; size alone qualifies only on a decision day.
     floor = active_policy().analyze_weight_floor_pct
     for row in required:
         if "loss" in row["analyze_reasons"]:
-            reasons[row["symbol"]].append(_loss_reason_text(row))
+            add_reason(row["symbol"], _loss_reason_text(row), 4)
         if decision_day and "weight" in row["analyze_reasons"]:
-            reasons[row["symbol"]].append(f"weight ≥ {floor:g}%")
-    # Focus follows portfolio weight so the largest positions lead.
+            add_reason(row["symbol"], f"weight ≥ {floor:g}%", 7)
     order = {h["symbol"]: -(h.get("market_value") or 0.0) for h in holdings}
-    focus = sorted(reasons, key=lambda s: (order.get(s, 0.0), s))
-    monitor = [row["symbol"] for row in required if row["symbol"] not in reasons]
+    ranked = sorted(reasons, key=lambda s: (priorities[s], order.get(s, 0.0), s))
+    focus = sorted(ranked[:active_policy().max_focus_names], key=lambda s: (order.get(s, 0.0), s))
+    deferred = ranked[active_policy().max_focus_names:]
+    monitor = [row["symbol"] for row in required if row["symbol"] not in reasons] + deferred
     return BriefingOutputPolicy(
         mode="DECISION DAY" if decision_day else "ROUTINE DAY",
-        material_symbols=tuple(sorted(reasons)),
+        material_symbols=tuple(sorted(focus)),
         refresh_candidates=refresh_candidates,
         focus_reasons=tuple((s, tuple(reasons[s])) for s in focus),
         monitor_symbols=tuple(monitor),
+        deferred_focus_reasons=tuple((s, tuple(reasons[s])) for s in deferred),
     )
 
 
