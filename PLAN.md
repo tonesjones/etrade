@@ -53,7 +53,13 @@ README daily workflow, `.env.example`, and the files table describe `reply.cmd` 
 ## Status
 
 - 2026-10-27: plan written. Items 1–3 delegated to Codex (Sol), item 4 to Codex (Luna), item 5 kept.
+- 2026-10-27: items 1–5 done on `feat/reply-vault-focus-cap`. 238 tests pass and ruff is clean. Replaying the 2026-10-27 portfolio gives 9 focus names (was 17) and no candidate review. Not yet run end to end with a real ChatGPT reply.
+
+## Next
+
+- Set `ETRADE_VAULT_BRIEFINGS_DIR` in `.env` and run `.\reply.cmd` on the next real reply.
+- Check that ChatGPT finishes a decision-day reply with 9 names.
 
 ## Open decisions
 
-- None yet.
+- Ranking puts every loss review ahead of size-only names. On 2026-10-27 that analyzes MP (1.2%) and ETHA (1.0%) in full but defers GOOGL (12.7%) and NVDA (11.2%) to the monitor scan. Decide whether large holdings should outrank small losses.
