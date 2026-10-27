@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import sys
 from argparse import ArgumentParser
@@ -32,6 +33,7 @@ from get_portfolio import (
     to_et,
 )
 from portfolio_policy import active_policy, load_policy, set_active_policy
+from vault_notes import check_vault_dir, write_vault_note
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 BRIEFINGS_DIR = PROJECT_ROOT / "briefings"
@@ -953,6 +955,10 @@ def main(argv=None) -> int:
     parser.add_argument(
         "--policy", type=Path, help="Use this policy JSON instead of portfolio_policy.json."
     )
+    parser.add_argument(
+        "--vault-dir", type=Path,
+        help="Folder for the reply's Obsidian note (default: ETRADE_VAULT_BRIEFINGS_DIR).",
+    )
     args = parser.parse_args(argv)
     if args.date and not _valid_date(args.date):
         parser.error("--date must be YYYY-MM-DD")
@@ -996,9 +1002,27 @@ def main(argv=None) -> int:
         except (OSError, ValueError, PortfolioDataError) as exc:
             print(f"Cannot record accepted response continuity: {exc}", file=sys.stderr)
             return 2
-    print(format_report(status, checks, computed, args.engine, date_str))
+    report = format_report(status, checks, computed, args.engine, date_str)
+    print(report)
     print(f"Saved reply:  {md_path}")
     print(f"Saved checks: {json_path}")
+    configured = os.environ.get("ETRADE_VAULT_BRIEFINGS_DIR")
+    vault_dir = args.vault_dir or (Path(configured) if configured else None)
+    if vault_dir is None:
+        print("Vault note skipped: set ETRADE_VAULT_BRIEFINGS_DIR in .env")
+    else:
+        error = check_vault_dir(vault_dir)
+        if error:
+            print(f"Vault note skipped: {error}", file=sys.stderr)
+        else:
+            try:
+                note = write_vault_note(
+                    vault_dir, reply=reply, meta=meta, engine=args.engine, status=status,
+                    report=report, date_str=date_str, response_md=md_path,
+                )
+                print(f"Vault note:   {note}")
+            except OSError as exc:
+                print(f"Vault note skipped: {exc}", file=sys.stderr)
     return 1 if checks.has_error else 0
 
 
