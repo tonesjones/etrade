@@ -38,15 +38,28 @@ def _lot_identity(row: dict) -> list[tuple]:
     ]
 
 
+def _sized_snapshot_symbols(today: dict, prior: dict, rows_key: str) -> set[str]:
+    symbols = set()
+    for snap in (prior, today):
+        values: dict[str, float] = {}
+        for row in snap.get(rows_key) or []:
+            symbol = row.get("symbol") or ""
+            values[symbol] = values.get(symbol, 0.0) + (row.get("market_value") or 0.0)
+        symbols.update(
+            symbol for symbol, value in values.items()
+            if symbol and not is_cash_symbol(symbol)
+            and value >= active_policy().analyze_market_value_floor
+        )
+    return symbols
+
+
 def _changed_weight_symbols(today_snap: dict, prior_snap: dict | None) -> set[str]:
     if not prior_snap:
         return set()
     previous = {row["symbol"]: row for row in prior_snap.get("holdings") or []}
     current = {row["symbol"]: row for row in today_snap.get("holdings") or []}
     changed = set()
-    for symbol in set(previous) | set(current):
-        if is_cash_symbol(symbol):
-            continue
+    for symbol in _sized_snapshot_symbols(today_snap, prior_snap, "holdings"):
         old = previous.get(symbol)
         new = current.get(symbol)
         if old is None or new is None:
@@ -87,7 +100,7 @@ def _changed_observation_symbols(today: dict, prior: dict | None) -> set[str]:
         for row in today.get("reviews") or []
     }
     changed.update(row[1] for row in previous_reviews ^ current_reviews if row[1])
-    return changed
+    return changed & _sized_snapshot_symbols(today, prior, "positions")
 
 
 def snapshot_dict(holdings, metrics: dict, as_of: datetime) -> dict:
@@ -458,9 +471,7 @@ def format_daily_delta(today_snap: dict, prior: dict | None, prior_label: str) -
     prior_h = {h["symbol"]: h for h in prior.get("holdings") or []}
     today_h = {h["symbol"]: h for h in today_snap.get("holdings") or []}
     material = []
-    for sym in sorted(set(prior_h) | set(today_h)):
-        if is_cash_symbol(sym):
-            continue
+    for sym in sorted(_sized_snapshot_symbols(today_snap, prior, "holdings")):
         pw = (prior_h.get(sym) or {}).get("weight")
         tw = (today_h.get(sym) or {}).get("weight")
         if pw is None:

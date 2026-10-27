@@ -28,12 +28,16 @@ class PortfolioPolicy:
     sleeves: dict[str, tuple[str, ...]]
     aliases: dict[str, str]
     marginal_examples: tuple[tuple[str, str | None, str], ...]
+    max_focus_names: int = 8
 
 
 def load_policy(path: Path = DEFAULT_POLICY_PATH) -> PortfolioPolicy:
     raw = json.loads(path.read_text(encoding="utf-8"))
     if raw.get("schema_version") != 1:
         raise ValueError(f"Unsupported policy schema in {path}")
+    max_focus_names = raw.get("max_focus_names", 8)
+    if type(max_focus_names) is not int or max_focus_names < 1:
+        raise ValueError("max_focus_names must be an integer >= 1")
     required_sleeves = {
         "direct_ai_semi", "broad_ai_cycle", "crypto", "payments", "broad_index"
     }
@@ -72,6 +76,7 @@ def load_policy(path: Path = DEFAULT_POLICY_PATH) -> PortfolioPolicy:
         sleeves={k: tuple(str(s).upper() for s in v) for k, v in sleeves.items()},
         aliases={str(k).upper(): str(v) for k, v in (raw.get("aliases") or {}).items()},
         marginal_examples=tuple(examples),
+        max_focus_names=max_focus_names,
     )
 
 

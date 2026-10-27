@@ -448,14 +448,16 @@ class ContinuityAndCadenceTests(unittest.TestCase):
                     briefing.save_briefing_result(result, "", AS_OF)
             self.assertFalse((root / "briefings" / "candidate_refresh_state.json").exists())
 
-    def test_decision_day_forces_candidate_refresh(self):
+    def test_decision_day_respects_candidate_refresh_cadence(self):
         base = briefing.snapshot_dict(
             [], {"grand_total": 0, "cluster_w": 0, "broad_w": 0, "cash_w": 0,
                  "top5_w": 0, "breaches": []}, AS_OF
         )
-        prior_observations = {"positions": [{"symbol": "AAA", "quantity": 10}],
+        prior_observations = {"positions": [{"symbol": "AAA", "quantity": 10,
+                                            "market_value": 5000.0}],
                               "reviews": []}
-        today_observations = {"positions": [{"symbol": "AAA", "quantity": 11}],
+        today_observations = {"positions": [{"symbol": "AAA", "quantity": 11,
+                                            "market_value": 5500.0}],
                               "reviews": []}
         context = {"candidate_review_history": [{"completed_at": "2026-10-20"}]}
         with tempfile.TemporaryDirectory() as directory:
@@ -474,7 +476,8 @@ class ContinuityAndCadenceTests(unittest.TestCase):
                     AS_OF, context,
                 )
         self.assertFalse(quiet_policy.refresh_candidates)
-        self.assertTrue(policy.refresh_candidates)
+        self.assertEqual(policy.mode, "DECISION DAY")
+        self.assertFalse(policy.refresh_candidates)
 
     def test_build_without_save_does_not_create_candidate_state(self):
         with tempfile.TemporaryDirectory() as directory:
