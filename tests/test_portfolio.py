@@ -1,8 +1,6 @@
-import io
 import json
 import tempfile
 import unittest
-from contextlib import redirect_stdout
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -311,68 +309,6 @@ class CashLotTests(unittest.TestCase):
 
 
 class BriefingPolicyTests(unittest.TestCase):
-    def test_offline_input_never_fetches_and_persists_after_build(self):
-        fixture = Path(__file__).parent / "fixtures" / "portable_portfolio.txt"
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            briefings = root / "briefings"
-            prompts = root / "prompts"
-            briefings.mkdir()
-            prompts.mkdir()
-            (briefings / "weights_2026-09-15.json").write_text(
-                json.dumps({"date": "2026-09-15", "holdings": []}),
-                encoding="utf-8",
-            )
-            (briefings / "observations_2026-09-15.json").write_text(
-                json.dumps({"date": "2026-09-15", "positions": [], "reviews": []}),
-                encoding="utf-8",
-            )
-            with (
-                patch.object(briefing, "BRIEFINGS_DIR", briefings),
-                patch.object(briefing, "OUT_DIR", prompts),
-                patch.object(briefing, "CONTEXT_PATH", root / "missing-context.json"),
-                patch.object(
-                    briefing,
-                    "fetch_portfolio_block",
-                    side_effect=AssertionError("network path used"),
-                ),
-                patch.object(briefing, "copy_to_clipboard", return_value=True),
-                patch.object(portfolio, "PROJECT_ROOT", root),
-                patch.object(
-                    briefing, "now_et", return_value=datetime(2026, 9, 18, 18, 0, tzinfo=ET)
-                ),
-                redirect_stdout(io.StringIO()),
-            ):
-                exit_code = briefing.main(["--input-file", str(fixture)])
-            self.assertEqual(exit_code, 0)
-            prompt = (prompts / "daily_briefing_prompt_2026-09-18.md").read_text(encoding="utf-8")
-            self.assertIn("3 calendar days earlier", prompt)
-            self.assertIn("changes are cumulative", prompt)
-            self.assertTrue((briefings / "weights_2026-09-18.json").exists())
-            self.assertTrue((briefings / "observations_2026-09-18.json").exists())
-
-    def test_invalid_offline_input_writes_no_snapshots(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            source = root / "legacy.txt"
-            source.write_text("legacy human-readable dump", encoding="utf-8")
-            briefings = root / "briefings"
-            prompts = root / "prompts"
-            with (
-                patch.object(briefing, "BRIEFINGS_DIR", briefings),
-                patch.object(briefing, "OUT_DIR", prompts),
-                patch.object(
-                    briefing,
-                    "fetch_portfolio_block",
-                    side_effect=AssertionError("network path used"),
-                ),
-                redirect_stdout(io.StringIO()),
-            ):
-                with self.assertRaises(portfolio.PortfolioDataError):
-                    briefing.main(["--input-file", str(source)])
-            self.assertFalse(briefings.exists())
-            self.assertFalse(prompts.exists())
-
     def test_context_loader_and_formatters_preserve_dated_research(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "portfolio_context.json"

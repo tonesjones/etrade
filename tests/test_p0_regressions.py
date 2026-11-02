@@ -1,10 +1,8 @@
 """Regression tests for the P0 data fixes (commit 2af10f2)."""
 
-import io
 import json
 import tempfile
 import unittest
-from contextlib import ExitStack, redirect_stderr, redirect_stdout
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
@@ -15,7 +13,6 @@ import build_briefing_prompt as briefing
 import get_portfolio as portfolio
 
 ET = ZoneInfo("America/New_York")
-FIXTURE = Path(__file__).parent / "fixtures" / "portable_portfolio.txt"
 
 
 def position(symbol: str, market_value: float, **overrides) -> dict:
@@ -44,22 +41,6 @@ def taxable_result(holdings: list[dict]) -> dict:
         "total_value": sum(h["market_value"] for h in holdings),
         "holdings": holdings,
     }
-
-
-def run_offline_build(root: Path, now: datetime, extra_args=()) -> int:
-    """Run main() on the fixture with every path patched into root."""
-    briefings = root / "briefings"
-    prompts = root / "prompts"
-    with ExitStack() as stack:
-        stack.enter_context(patch.object(briefing, "BRIEFINGS_DIR", briefings))
-        stack.enter_context(patch.object(briefing, "OUT_DIR", prompts))
-        stack.enter_context(patch.object(briefing, "CONTEXT_PATH", root / "missing.json"))
-        stack.enter_context(patch.object(briefing, "copy_to_clipboard", return_value=True))
-        stack.enter_context(patch.object(portfolio, "PROJECT_ROOT", root))
-        stack.enter_context(patch.object(briefing, "now_et", return_value=now))
-        stack.enter_context(redirect_stdout(io.StringIO()))
-        stack.enter_context(redirect_stderr(io.StringIO()))
-        return briefing.main(["--input-file", str(FIXTURE), *extra_args])
 
 
 class Top5ExcludesCashTests(unittest.TestCase):
@@ -173,24 +154,6 @@ class BackdatedBuildIgnoresNewerSnapshotsTests(unittest.TestCase):
         self.assertIsNone(obs)
 
 
-class StaleOfflineInputRefusedTests(unittest.TestCase):
-    NOW = datetime(2026, 10, 2, 9, 0, tzinfo=ET)
-
-    def test_stale_input_returns_3_and_writes_nothing(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            self.assertEqual(run_offline_build(root, self.NOW), 3)
-            self.assertEqual(list(root.rglob("weights_*.json")), [])
-            self.assertEqual(list(root.rglob("observations_*.json")), [])
-            self.assertEqual(list(root.rglob("daily_briefing_prompt_*.md")), [])
-
-    def test_allow_stale_builds(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            self.assertEqual(run_offline_build(root, self.NOW, ["--allow-stale"]), 0)
-            self.assertTrue((root / "briefings" / "weights_2026-09-18.json").exists())
-
-
 class AccountTypeFallbackTests(unittest.TestCase):
     def test_unknown_type_with_sept_in_name_is_taxable_and_warns(self):
         with self.assertLogs("get_portfolio", level="WARNING") as logs:
@@ -261,15 +224,17 @@ class TermFromDatesTests(unittest.TestCase):
 class PromptContractTests(unittest.TestCase):
     def test_prompt_has_briefing_id_and_web_guard(self):
         now = datetime(2026, 9, 18, 18, 0, tzinfo=ET)
+        results = [taxable_result([position("AAA", 1000.0)])]
+        holdings, accounts = briefing.consolidate(results, 1000.0)
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            self.assertEqual(run_offline_build(root, now), 0)
-            meta = json.loads(
-                (root / "briefings" / "briefing_2026-09-18.json").read_text(encoding="utf-8")
-            )
-            prompt = (root / "prompts" / "daily_briefing_prompt_2026-09-18.md").read_text(
-                encoding="utf-8"
-            )
+            with patch.object(briefing, "CONTEXT_PATH", root / "missing.json"), patch.object(
+                briefing, "MANUAL_HOLDINGS_PATH", root / "missing.md"
+            ), patch.object(briefing, "BRIEFINGS_DIR", root / "briefings"):
+                result = briefing.build_briefing(
+                    holdings, accounts, 1000.0, now, "portfolio", results=results,
+                )
+        meta, prompt = result.meta, result.prompt
         self.assertRegex(meta["briefing_id"], r"^2026-09-18-[0-9a-f]{8}$")
         self.assertIn(f'"briefing_id": "{meta["briefing_id"]}"', prompt)
         self.assertIn("Actions JSON", prompt)

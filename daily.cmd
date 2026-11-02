@@ -6,5 +6,5 @@ if not exist ".venv\Scripts\python.exe" (
     exit /b 1
 )
 
-".venv\Scripts\python.exe" "daily_briefing.py"
+".venv\Scripts\python.exe" "daily_briefing.py" %*
 exit /b %errorlevel%

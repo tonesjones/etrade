@@ -230,36 +230,6 @@ class ManualSupplementTests(unittest.TestCase):
         fetch_quote.assert_not_called()
         self.assertIsNone(offline_result.meta["manual_supplement"]["price"])
 
-    def test_offline_input_file_run_does_not_fetch_quote_or_live_portfolio(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            input_file = root / "portfolio.txt"
-            input_file.write_text("portable", encoding="utf-8")
-            args = type("Args", (), {
-                "from_clipboard": False,
-                "input_file": str(input_file),
-                "allow_partial": False,
-                "allow_stale": False,
-                "policy": None,
-            })()
-            parser = briefing.ArgumentParser()
-            with (patch.object(briefing, "BRIEFINGS_DIR", root / "briefings"),
-                  patch.object(briefing, "OUT_DIR", root / "prompts"),
-                  patch.object(portfolio, "PROJECT_ROOT", root),
-                  patch.object(briefing, "parse_portable_portfolio_text", return_value=(
-                      "portable", 1000, 1, api_results(holding("CASH", 1000, 1)), AS_OF,
-                  )),
-                  patch.object(briefing, "now_et", return_value=AS_OF),
-                  patch.object(briefing, "fetch_snps_quote") as fetch_quote,
-                  patch.object(briefing, "fetch_portfolio_block") as fetch_portfolio,
-                  patch.object(briefing, "save_briefing_result",
-                               return_value=(root / "dated", root / "latest")),
-                  patch.object(briefing, "copy_to_clipboard", return_value=False)):
-                self.assertEqual(briefing._run(args, parser), 0)
-            fetch_quote.assert_not_called()
-            fetch_portfolio.assert_not_called()
-
-
 class FundingTests(unittest.TestCase):
     def check(self, trades, holdings, total=None):
         results = api_results(*holdings)
@@ -594,7 +564,7 @@ class DailyLauncherTests(unittest.TestCase):
         with patch.object(daily_briefing, "authorization_needed", return_value=False), \
              patch.object(daily_briefing.subprocess, "run") as run:
             run.return_value.returncode = 0
-            self.assertEqual(daily_briefing.main(), 0)
+            self.assertEqual(daily_briefing.main(["--no-wait"]), 0)
         self.assertEqual(run.call_count, 1)
         self.assertTrue(str(run.call_args.args[0][1]).endswith("build_briefing_prompt.py"))
 
@@ -602,7 +572,7 @@ class DailyLauncherTests(unittest.TestCase):
         with patch.object(daily_briefing, "authorization_needed", return_value=True), \
              patch.object(daily_briefing.subprocess, "run") as run:
             run.return_value.returncode = 1
-            self.assertEqual(daily_briefing.main(), 1)
+            self.assertEqual(daily_briefing.main(["--no-wait"]), 1)
         self.assertEqual(run.call_count, 1)
         self.assertTrue(str(run.call_args.args[0][1]).endswith("etrade_auth.py"))
 
@@ -610,7 +580,7 @@ class DailyLauncherTests(unittest.TestCase):
         with patch.object(daily_briefing, "authorization_needed", return_value=False), \
              patch.object(daily_briefing.subprocess, "run") as run:
             run.return_value.returncode = 3
-            self.assertEqual(daily_briefing.main(), 3)
+            self.assertEqual(daily_briefing.main(["--no-wait"]), 3)
         self.assertEqual(run.call_count, 1)
 
 

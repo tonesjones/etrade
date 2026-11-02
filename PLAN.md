@@ -2,64 +2,44 @@
 
 ## Goal
 
-Make the daily loop finish in a chat window and save each reply to the Obsidian vault without manual file handling:
-
-1. `.\daily.cmd` builds the prompt and copies it.
-2. The owner pastes it into ChatGPT and copies the reply.
-3. `.\reply.cmd` imports the reply, validates it, records continuity, and writes a vault note.
+Each market morning, one window takes the owner from the E*TRADE login to an imported, validated reply saved in the vault. The only manual steps are the login, pasting the prompt into the model, copying the reply, and placing any trade in E*TRADE.
 
 ## Items
 
-### 1. Stop dust positions from triggering decision days
+### 1. Remove the offline prompt build
 
-Positions under `analyze_market_value_floor` ($5,000) on both the prior and current snapshot no longer count as weight changes or position changes for decision-day and focus purposes.
-
-Done when:
-- A $300 position appearing, or a 1-share position disappearing, leaves a ROUTINE DAY routine.
-- The same change at or above the floor still triggers a decision day.
-- Tests cover both cases.
-
-### 2. Candidate review runs weekly, not on every decision day
+`briefing.cmd` and the `--from-clipboard`, `--input-file`, and `--allow-stale` options of `build_briefing_prompt.py` are removed. The portable portfolio format and its parser stay, because `import_response.py` reads saved briefings with it.
 
 Done when:
-- `refresh_candidates` is true only on the first run or when the weekly cadence is due.
-- A decision day within the 7-day window does not request candidates.
-- Tests cover it.
+- `briefing.cmd` is gone and `build_briefing_prompt.py` always builds from live data.
+- `import_response.py` still imports saved replies; tests pass.
 
-### 3. Cap fully analysed focus names
+### 2. One-window daily run
 
-New optional policy key `max_focus_names` (default 8). Focus names are ranked by reason priority, then market value. Names over the cap move to the monitor list with their reasons. The manual SNPS entry is added on top of the cap.
-
-Done when:
-- A prompt with more qualifying names lists at most 8 API focus names, plus SNPS when present.
-- Deferred names appear in the monitor scan with their reasons.
-- The importer requires answers only for names in the saved `focus_symbols`.
-- Tests cover ranking and overflow.
-
-### 4. `reply.cmd` and the vault note
-
-`reply.cmd [engine]` (default `chatgpt`) runs `import_response.py --from-clipboard`. When `ETRADE_VAULT_BRIEFINGS_DIR` is set, the importer also writes a Markdown note there with frontmatter, the import report, a link to the previous note, and the full reply. It refuses a directory inside a git repo that the repo does not ignore, because the note contains real portfolio data.
+`daily.cmd [engine]` opens the E*TRADE authorization page, builds the prompt, opens ChatGPT for the `chatgpt` engine, then waits for a copied reply whose `briefing_id` matches the new prompt and imports it. `--no-wait` keeps the old build-only behavior. Ctrl+C stops waiting without importing.
 
 Done when:
-- `reply.cmd` with a copied reply prints ACCEPTED or REJECTED and the note path.
-- The note is written for both statuses and never overwrites an earlier note.
-- An unset variable skips the note with a one-line message; an unignored git path is refused.
-- Tests cover note content, naming, and the git-ignore guard.
+- Unit tests cover the reply match (prompt text, matching reply, other briefing, no JSON), a wait that imports after non-matching polls, `--no-wait`, and Ctrl+C.
+- One real morning run imports the reply with no `reply.cmd`.
 
-### 5. Docs
+### 3. Docs match the daily use
 
-README daily workflow, `.env.example`, and the files table describe `reply.cmd` and the vault note.
+The README daily section describes the one-window run first. Offline and two-model sections are gone. `docs/history-retention.md` and `routing-log.md` are deleted.
+
+Done when:
+- No repo doc mentions `briefing.cmd`, the offline build, or the retired files.
 
 ## Status
 
-- 2026-10-27: plan written. Items 1–3 delegated to Codex (Sol), item 4 to Codex (Luna), item 5 kept.
-- 2026-10-27: items 1–5 done on `feat/reply-vault-focus-cap`. 238 tests pass and ruff is clean. Replaying the 2026-10-27 portfolio gives 9 focus names (was 17) and no candidate review. Not yet run end to end with a real ChatGPT reply.
+- 2026-10-27: reply import, vault note, and focus cap done (PR #5). 238 tests pass.
+- 2026-10-27 to 2026-11-02: five market days imported as `ACCEPTED` with ChatGPT.
+- 2026-11-02: scope audit. Items 1 to 3 built on `chore/daily-flow-cleanup`. Items 1 and 2 drafted by Codex (Luna and Sol), reviewed in the main session.
 
 ## Next
 
-- Set `ETRADE_VAULT_BRIEFINGS_DIR` in `.env` and run `.\reply.cmd` on the next real reply.
-- Check that ChatGPT finishes a decision-day reply with 9 names.
+- Run the one-window flow on the next market morning and confirm the vault note appears.
 
 ## Open decisions
 
-- Ranking puts every loss review ahead of size-only names. On 2026-10-27 that analyzes MP (1.2%) and ETHA (1.0%) in full but defers GOOGL (12.7%) and NVDA (11.2%) to the monitor scan. Decide whether large holdings should outrank small losses.
+- Focus ranking puts every loss review ahead of size-only names, so large holdings can drop to the monitor scan while small losses get full analysis. Decide whether large holdings should outrank small losses.
+- Later, if copying and pasting still costs too much time: call a model API with web search instead of the chat window (per-run cost, different data-retention terms).

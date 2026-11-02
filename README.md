@@ -8,7 +8,7 @@ Each holding in the prompt carries E\*TRADE's price paid, cost per share, total 
 
 ## Set up once
 
-1. Create a virtual environment and install the dependencies. `daily.cmd` and `briefing.cmd` expect the environment at `.venv`.
+1. Create a virtual environment and install the dependencies. `daily.cmd` and `reply.cmd` expect the environment at `.venv`.
 
    ```powershell
    cd path\to\etrade-briefings
@@ -37,22 +37,29 @@ The scripts pull every active account by default. To pull one account only, set 
 
 ## Daily workflow
 
-### 1. Build the live briefing
-
-Run this command from PowerShell in the project folder:
+Run one command from PowerShell in the project folder, or double-click `daily.cmd` in File Explorer:
 
 ```powershell
 .\daily.cmd
 ```
 
-`daily.cmd` uses the project's `.venv` interpreter. If either access token is missing or `ETRADE_AUTH_DATE` is not today's US Eastern date, it starts authorization:
+The window takes you from login to an imported result:
 
-1. Open the URL that the script prints, log in, and authorize the app.
-2. Paste the verification code into the terminal.
+1. If today's E\*TRADE tokens are missing or expired, the script opens the E\*TRADE authorization page in your browser. Log in, authorize the app, and paste the verification code into the window.
+2. The script builds the prompt from your live positions, copies it to the clipboard, and opens ChatGPT.
+3. Paste the prompt into a new chat with web search turned on, and send it.
+4. When the reply is complete, copy the whole reply with the message's copy button.
+5. The window finds the copied reply, imports it, and prints `ACCEPTED` or `REJECTED` with the paths of the saved reply and the vault note.
 
-Authorization saves the access token pair and `ETRADE_AUTH_DATE` to `.env` without printing the token values. The launcher reloads those values, builds the live prompt, and copies it to the clipboard. Later runs on the same Eastern day reuse the saved tokens.
+`ACCEPTED` means the trades fit your positions. It doesn't mean they are good trades. Before you place anything, read the reasoning, the tax impact, and the realized-gain numbers in the saved `.json`. Don't use any trade from a `REJECTED` reply. Place any approved trade yourself in E\*TRADE.
 
-If authorization or the build fails, the launcher stops. A failed run leaves the clipboard unchanged, so don't send its existing contents as a new briefing.
+To use another model, name its engine: `.\daily.cmd codex`. The engines are `codex`, `claude`, `chatgpt`, `grok`, and `other`. The script opens a chat page only for `chatgpt`.
+
+The window waits up to 60 minutes for the reply. To stop waiting, press **Ctrl+C**. To build the prompt without waiting, run `.\daily.cmd --no-wait`.
+
+### Authorize again after token expiry
+
+Authorization saves the access token pair and `ETRADE_AUTH_DATE` to `.env` without printing the token values. Later runs on the same US Eastern day skip the login.
 
 E\*TRADE access tokens expire at midnight US Eastern. If E\*TRADE rejects tokens dated today, authorize again and rerun the launcher:
 
@@ -61,41 +68,27 @@ E\*TRADE access tokens expire at midnight US Eastern. If E\*TRADE rejects tokens
 .\daily.cmd
 ```
 
-### 2. Send the prompt to a model
+If authorization or the build fails, the launcher stops. A failed run leaves the clipboard unchanged, so don't send its existing contents as a new briefing.
 
-Open a fresh chat in a model with web search, paste the prompt with **Ctrl+V**, and send it.
+### Import a reply later
 
-#### Build manually or from saved data
-
-If your virtual environment is active and today's tokens are valid, `python build_briefing_prompt.py` builds the live prompt directly.
-
-For an offline build, use a portfolio dump you saved earlier. To create a dump, run `python get_portfolio.py` with valid tokens. That command contacts E\*TRADE, saves the portfolio, and copies it with an embedded JSON payload to the clipboard. Then run:
-
-```powershell
-.\briefing.cmd
-```
-
-`briefing.cmd` builds the prompt from the clipboard without contacting E\*TRADE. It validates the JSON payload and rejects older text-only dumps that lack exact account and lot identity. Offline input older than 24 hours requires `--allow-stale`.
-
-If another program replaced the clipboard, build from the saved portfolio file instead:
-
-```powershell
-python build_briefing_prompt.py --input-file .\briefings\portfolio_YYYY-MM-DD.txt
-```
-
-The `python` commands in this README assume you activated `.venv`. The `.cmd` launchers select that environment themselves.
-
-### 3. Import the model's reply
-
-The prompt asks the model to end its reply with a fenced `json` block of proposed actions. The importer reads that block. You don't send it to another model.
-
-Copy the whole reply with the message's copy button, then run:
+If you stopped waiting, copy the whole reply and run:
 
 ```powershell
 .\reply.cmd
 ```
 
-`reply.cmd` imports a ChatGPT reply from the clipboard. For another model, name its engine: `.\reply.cmd codex`. The engines are `codex`, `claude`, `chatgpt`, `grok`, and `other`. To import from a file, run `python import_response.py --engine chatgpt --input-file reply.md`.
+`reply.cmd` imports a ChatGPT reply from the clipboard. For another model, name its engine: `.\reply.cmd codex`. To import from a file, run `python import_response.py --engine chatgpt --input-file reply.md`.
+
+The importer saves each reply to `responses/YYYY-MM-DD_<engine>.md` and `.json`. Another import on the same day adds a suffix, such as `_2`, so nothing is overwritten. To re-check a saved reply, pass that file:
+
+```powershell
+python import_response.py --engine codex --input-file .\responses\YYYY-MM-DD_codex.md
+```
+
+The `python` commands in this README assume you activated `.venv`. The `.cmd` launchers select that environment themselves.
+
+### Save each reply to the vault
 
 To save each reply as a note in your Obsidian vault, set `ETRADE_VAULT_BRIEFINGS_DIR` in `.env` to a folder that git ignores, for example a `95 Private` folder:
 
@@ -105,7 +98,9 @@ ETRADE_VAULT_BRIEFINGS_DIR=C:\path\to\Vault\95 Private\Etrade\Briefings
 
 The importer then writes `YYYY-MM-DD <engine>.md` to that folder for every import, accepted or rejected. The note holds the import result, a link to the previous note, and the full reply. The note contains real portfolio data, so the importer refuses a folder inside a git repository that doesn't ignore it. `--vault-dir PATH` overrides the setting for one run.
 
-The importer reads the reply's `briefing_id` to select the saved portfolio for that prompt, even if you built another prompt afterward. Use `--briefing-id ID` to select it explicitly. A date alone is ambiguous when several briefings exist for that day.
+### What the importer checks
+
+The prompt asks the model to end its reply with a fenced `json` block of proposed actions. The importer reads that block and its `briefing_id`, which selects the saved portfolio for that prompt, even if you built another prompt afterward. Use `--briefing-id ID` to select it explicitly. A date alone is ambiguous when several briefings exist for that day.
 
 The importer checks the reply against that portfolio:
 
@@ -116,27 +111,16 @@ The importer checks the reply against that portfolio:
 - No buy creates a wash sale. The lookback covers all accounts.
 - No buy adds to the direct AI and semiconductor sleeve when the sleeve is at its no-add weight.
 
-The importer then recomputes proceeds, realized gain per lot, ST or LT status, days until long-term, and portfolio weights before and after. It prints `ACCEPTED` or `REJECTED`. Don't use any trade from a `REJECTED` reply.
+The importer then recomputes proceeds, realized gain per lot, ST or LT status, days until long-term, and portfolio weights before and after. It prints `ACCEPTED` or `REJECTED`.
 
 The importer doesn't know settlement dates or E\*TRADE buying power, so its funding status always ends in `SETTLEMENT_UNKNOWN`. Confirm buying power in E\*TRADE before you place a buy funded by a same-day sale.
 
-`ACCEPTED` means the trades fit your positions. It doesn't mean they are good trades. Read the reasoning, and read the realized-gain numbers in the saved `.json`, before you place anything.
+### Troubleshooting
 
-The importer saves each reply to `responses/YYYY-MM-DD_<engine>.md` and `.json`. Another import on the same day adds a suffix, such as `_2`, so nothing is overwritten. To re-check a saved reply, pass that file:
-
-```powershell
-python import_response.py --engine codex --input-file .\responses\YYYY-MM-DD_codex.md
-```
-
-If the copy dropped the code fences, the importer still finds the last JSON object that has a `briefing_id`. If it reports `no_json_block`, the model didn't write the block. Ask the model to "end with the fenced json actions block exactly as the prompt specified", then import the new reply.
-
-### 4. Compare two models (optional)
-
-Paste the same prompt into two models in fresh chats, and import each reply with its own `--engine`. Compare their sources, reasoning, and the tax impact in each `responses/*.json` file. Agreement between models is not independent evidence that a trade is suitable.
-
-### Run the workflow from Claude Code
-
-Run `claude` in the project folder, or open the folder in the Code tab of the Claude desktop app. Claude can run the build and import scripts, read `responses/`, and compare replies for you. You still log in for `etrade_auth.py`, paste the prompt into the outside model, and place trades in E\*TRADE.
+- **The importer reports `no_json_block`.** The model didn't write the actions block. Ask the model to "end with the fenced json actions block exactly as the prompt specified", then copy the new reply.
+- **The copy dropped the code fences.** The importer still finds the last JSON object that has a `briefing_id`.
+- **The window ignores the copied reply.** The reply's `briefing_id` belongs to a different prompt, or the clipboard still holds the prompt itself. Copy the reply to the prompt you just built, or import the other reply with `python import_response.py --engine chatgpt --from-clipboard --briefing-id ID`.
+- **You need to inspect the raw positions.** With valid tokens, `python get_portfolio.py` saves a per-account dump to `briefings/portfolio_YYYY-MM-DD.txt` and copies it to the clipboard. Don't paste it into the model.
 
 ### Get updates
 
@@ -152,10 +136,9 @@ After you pull, rebuild the prompt before you send it, so the model's reply matc
 
 | Command | Output |
 |---------|--------|
-| `daily.cmd` | Saves refreshed tokens to `.env` when needed, then writes the same outputs as the live prompt build. |
+| `daily.cmd` | Saves refreshed tokens to `.env` when needed, writes the same outputs as the live prompt build, then writes the same outputs as `import_response.py` for the copied reply. |
 | `build_briefing_prompt.py` | Prompt to the clipboard and `prompts/`. Writes `briefings/weights_*.json` (portfolio delta) and `briefings/observations_*.json` (account, quantity, and lot reconciliation). |
-| `briefing.cmd` | The same outputs, built offline from the clipboard payload. |
-| `get_portfolio.py` | Full per-account dump with cost, P/L, and ST or LT status, to the clipboard and `briefings/portfolio_YYYY-MM-DD.txt`. For diagnostics and offline builds. Don't paste it into the model. |
+| `get_portfolio.py` | Full per-account dump with cost, P/L, and ST or LT status, to the clipboard and `briefings/portfolio_YYYY-MM-DD.txt`. For diagnostics. Don't paste it into the model. |
 | `import_response.py` | `responses/YYYY-MM-DD_<engine>.md` and `.json`, with the checks, computed trades, and weights. A vault note when `ETRADE_VAULT_BRIEFINGS_DIR` is set. |
 | `reply.cmd` | The same outputs as `import_response.py`, from a reply on the clipboard. |
 
@@ -231,7 +214,7 @@ The prompt asks for a candidate review (new places to put cash) on the first run
 The E\*TRADE API doesn't return the Synopsys stock-plan account. Record those lots in `docs/manual-stock-plan-holdings.md`. Git ignores the file. The build reads its `SNPS` rows and adds a separate supplement to the prompt:
 
 - On a live build, the script fetches a read-only `SNPS` quote and shows the combined total and combined `SNPS` weight next to the API-only totals.
-- If the quote fails, or the build is offline, the prompt marks combined exposure as incomplete.
+- If the quote fails, the prompt marks combined exposure as incomplete.
 - If an API account reports the same `SNPS` lots, the build doesn't add them again.
 - `SNPS` is always a focus name. The manual shares never count as cash for trade funding, and their basis is an estimate, not tax basis.
 
@@ -268,13 +251,12 @@ The local output is your real portfolio: dollar values, cost basis, lots, and th
 
 | File | Purpose |
 |------|---------|
-| `daily.cmd` | Daily launcher. Authorizes when needed, then builds the live prompt. |
-| `daily_briefing.py` | Runs authorization and the live build for `daily.cmd`. |
-| `build_briefing_prompt.py` | Builds the prompt from live data or a saved portfolio. |
-| `briefing.cmd` | Offline build from the clipboard payload. |
+| `daily.cmd` | Daily launcher. Authorizes when needed, builds the live prompt, and imports the copied reply. |
+| `daily_briefing.py` | Runs authorization, the live build, and the reply import for `daily.cmd`. |
+| `build_briefing_prompt.py` | Builds the prompt from live E\*TRADE data. |
 | `get_portfolio.py` | Portfolio dump with cost, P/L, and ST or LT status. |
 | `import_response.py` | Validates a model reply against the briefing's portfolio data and saves it. |
-| `reply.cmd` | Imports a reply from the clipboard. |
+| `reply.cmd` | Imports a reply from the clipboard when `daily.cmd` isn't waiting. |
 | `vault_notes.py` | Writes the vault note for an imported reply. |
 | `etrade_auth.py` | OAuth login and atomic `.env` token update. |
 | `templates/briefing_prompt.md` | Prompt wording, with `{placeholders}`. |
@@ -283,7 +265,6 @@ The local output is your real portfolio: dollar values, cost basis, lots, and th
 | `portfolio_policy.json` | Limits, sleeves, harvest thresholds, and $10k examples. |
 | `portfolio_policy.py` | Loads and validates `portfolio_policy.json`. |
 | `portfolio_context.example.json` | Template for owner constraints, dated research, and earlier proposals. |
-| `docs/history-retention.md` | How much briefing history to keep. |
 | `.env.example` | Secrets template. |
 | `briefings/`, `prompts/`, `responses/` | Local output. Git ignores these folders. |
 
