@@ -46,14 +46,14 @@ Run one command from PowerShell in the project folder, or double-click `daily.cm
 The window takes you from login to an imported result:
 
 1. If today's E\*TRADE tokens are missing or expired, the script opens the E\*TRADE authorization page in your browser. Log in, authorize the app, and paste the verification code into the window.
-2. The script builds the prompt from your live positions, copies it to the clipboard, and opens ChatGPT.
-3. Paste the prompt into a new chat with web search turned on, and send it.
+2. The script builds the prompt from your live positions and copies it to the clipboard.
+3. Paste the prompt into a new chat in a model with web search, such as ChatGPT or Claude, and send it.
 4. When the reply is complete, copy the whole reply with the message's copy button.
 5. The window finds the copied reply, imports it, and prints `ACCEPTED` or `REJECTED` with the paths of the saved reply and the vault note.
 
 `ACCEPTED` means the trades fit your positions. It doesn't mean they are good trades. Before you place anything, read the reasoning, the tax impact, and the realized-gain numbers in the saved `.json`. Don't use any trade from a `REJECTED` reply. Place any approved trade yourself in E\*TRADE.
 
-To use another model, name its engine: `.\daily.cmd codex`. The engines are `codex`, `claude`, `chatgpt`, `grok`, and `other`. The script opens a chat page only for `chatgpt`.
+To use another model, name its engine: `.\daily.cmd codex`. The engines are `codex`, `claude`, `chatgpt`, `grok`, and `other`. The engine name labels the saved reply and the vault note.
 
 The window waits up to 60 minutes for the reply. To stop waiting, press **Ctrl+C**. To build the prompt without waiting, run `.\daily.cmd --no-wait`.
 
