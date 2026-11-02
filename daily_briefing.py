@@ -9,7 +9,6 @@ import os
 import subprocess
 import sys
 import time
-import webbrowser
 from datetime import datetime
 
 from dotenv import load_dotenv
@@ -61,12 +60,7 @@ def wait_for_reply(engine: str, timeout_minutes: float) -> int:
     except (OSError, ValueError, KeyError, TypeError) as exc:
         print(f"Cannot wait for reply: {exc}", file=sys.stderr)
         return 1
-    if engine == "chatgpt":
-        try:
-            webbrowser.open("https://chatgpt.com/")
-        except Exception:
-            pass
-    print("Paste the prompt into the model. When done, copy the whole reply.")
+    print("Paste the prompt into the model you choose. When done, copy the whole reply.")
     print("This window imports it automatically. Ctrl+C to stop and use reply.cmd later.")
     deadline = time.monotonic() + timeout_minutes * 60
     noticed = set()

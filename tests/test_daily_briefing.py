@@ -56,7 +56,7 @@ class DailyBriefingTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertEqual(daily_briefing.is_reply_for(text, 'today', prompt), expected)
 
-    def run_wait(self, clipboard, engine='chatgpt', timeout=60, browser_error=None):
+    def run_wait(self, clipboard, engine='chatgpt', timeout=60):
         with tempfile.TemporaryDirectory() as directory:
             project = Path(directory)
             (project / 'briefings').mkdir()
@@ -73,9 +73,7 @@ class DailyBriefingTests(unittest.TestCase):
                 patch.object(daily_briefing, 'read_clipboard_text', side_effect=clipboard),
                 patch.object(daily_briefing.time, 'sleep') as sleep,
                 patch.object(daily_briefing.subprocess, 'run') as run,
-                patch.object(
-                    daily_briefing.webbrowser, 'open', side_effect=browser_error
-                ) as browser,
+                patch('webbrowser.open') as browser,
                 patch('builtins.print') as output,
             ):
                 run.return_value.returncode = 7
@@ -97,7 +95,7 @@ class DailyBriefingTests(unittest.TestCase):
         ])
         self.assertEqual(sleep.call_count, 4)
         sleep.assert_called_with(2)
-        browser.assert_called_once_with('https://chatgpt.com/')
+        browser.assert_not_called()
         self.assertEqual(
             output.call_args_list.count(unittest.mock.call(
                 'Ignoring a reply for a different briefing_id.'
@@ -109,29 +107,20 @@ class DailyBriefingTests(unittest.TestCase):
         self.assertEqual(result, 0)
         run.assert_not_called()
 
-    def test_timeout_does_not_import_or_open_other_engine(self):
+    def test_timeout_does_not_import(self):
         result, run, sleep, browser, *_ = self.run_wait([], engine='claude', timeout=0)
         self.assertEqual(result, 1)
         run.assert_not_called()
         sleep.assert_not_called()
         browser.assert_not_called()
 
-    def test_browser_failure_does_not_stop_wait(self):
-        result, run, *_ = self.run_wait(
-            ['{"briefing_id": "today"}'], browser_error=OSError('no browser')
-        )
-        self.assertEqual(result, 7)
-        run.assert_called_once()
-
     def test_no_wait_does_not_poll(self):
         with (
             patch.object(daily_briefing, 'authorization_needed', return_value=False),
             patch.object(daily_briefing.subprocess, 'run') as run,
             patch.object(daily_briefing, 'read_clipboard_text') as clipboard,
-            patch.object(daily_briefing.webbrowser, 'open') as browser,
         ):
             run.return_value.returncode = 0
             self.assertEqual(daily_briefing.main(['--no-wait']), 0)
             run.assert_called_once()
             clipboard.assert_not_called()
-            browser.assert_not_called()

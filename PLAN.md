@@ -16,7 +16,7 @@ Done when:
 
 ### 2. One-window daily run
 
-`daily.cmd [engine]` opens the E*TRADE authorization page, builds the prompt, opens ChatGPT for the `chatgpt` engine, then waits for a copied reply whose `briefing_id` matches the new prompt and imports it. `--no-wait` keeps the old build-only behavior. Ctrl+C stops waiting without importing.
+`daily.cmd [engine]` opens the E*TRADE authorization page, builds the prompt, then waits for a copied reply whose `briefing_id` matches the new prompt and imports it. `--no-wait` keeps the old build-only behavior. Ctrl+C stops waiting without importing.
 
 Done when:
 - Unit tests cover the reply match (prompt text, matching reply, other briefing, no JSON), a wait that imports after non-matching polls, `--no-wait`, and Ctrl+C.
