@@ -52,8 +52,6 @@ from get_portfolio import (
     lot_term_conflict,
     lot_term_split,
     now_et,
-    parse_portable_portfolio_text,
-    read_clipboard_text,
     save_portfolio_block,
     term_from_lot,
 )
@@ -64,8 +62,6 @@ OUT_DIR = PROJECT_ROOT / "prompts"
 BRIEFINGS_DIR = PROJECT_ROOT / "briefings"
 CONTEXT_PATH = PROJECT_ROOT / "portfolio_context.json"
 MANUAL_HOLDINGS_PATH = PROJECT_ROOT / "docs" / "manual-stock-plan-holdings.md"
-# Offline input older than this is refused unless --allow-stale is given.
-MAX_OFFLINE_AGE_HOURS = 24
 
 
 @dataclass(frozen=True)
@@ -1432,21 +1428,6 @@ def main(argv=None) -> int:
         action="store_true",
         help="Generate an unsafe marked prompt when an account fails.",
     )
-    source = parser.add_mutually_exclusive_group()
-    source.add_argument(
-        "--from-clipboard",
-        action="store_true",
-        help="Build offline from the portable payload on the Windows clipboard.",
-    )
-    source.add_argument(
-        "--input-file",
-        help="Build offline from a portable payload file, or '-' for stdin.",
-    )
-    parser.add_argument(
-        "--allow-stale",
-        action="store_true",
-        help=f"Accept offline input older than {MAX_OFFLINE_AGE_HOURS} hours.",
-    )
     parser.add_argument(
         "--policy",
         type=Path,
@@ -1456,51 +1437,26 @@ def main(argv=None) -> int:
     if args.policy:
         set_active_policy(load_policy(args.policy))
     try:
-        return _run(args, parser)
+        return _run(args)
     except AuthExpiredError as exc:
         print(f"\n{exc}", file=sys.stderr)
         return 2
 
 
-def _run(args, parser) -> int:
-    live_build = False
-    if args.from_clipboard or args.input_file:
-        if args.allow_partial:
-            parser.error("--allow-partial is only available for live fetching")
-        print("Loading portable portfolio without contacting E*TRADE...")
-        if args.from_clipboard:
-            pasted = read_clipboard_text()
-        elif args.input_file == "-":
-            pasted = sys.stdin.read()
-        else:
-            pasted = Path(args.input_file).read_text(encoding="utf-8")
-        formatted, grand_total, npos, results, as_of = parse_portable_portfolio_text(
-            pasted
-        )
-        age_hours = (now_et() - as_of).total_seconds() / 3600
-        if age_hours > MAX_OFFLINE_AGE_HOURS and not args.allow_stale:
-            print(
-                f"\nPortfolio data was observed {as_of:%Y-%m-%d %H:%M %Z} "
-                f"({age_hours:.0f} hours ago). Re-run get_portfolio.py, or pass "
-                "--allow-stale to build from old data deliberately.",
-                file=sys.stderr,
-            )
-            return 3
-    else:
-        live_build = True
-        print("Fetching live E*TRADE portfolio...")
-        formatted, grand_total, npos, results, as_of = fetch_portfolio_block(
-            verbose=True, allow_partial=args.allow_partial
-        )
-        if not any(result.get("error") for result in results):
-            # Keep the structured payload so import_response.py can check a reply
-            # against exact accounts and lots.
-            formatted = format_portable_portfolio_text(formatted, results, as_of)
+def _run(args) -> int:
+    print("Fetching live E*TRADE portfolio...")
+    formatted, grand_total, npos, results, as_of = fetch_portfolio_block(
+        verbose=True, allow_partial=args.allow_partial
+    )
+    if not any(result.get("error") for result in results):
+        # Keep the structured payload so import_response.py can check a reply
+        # against exact accounts and lots.
+        formatted = format_portable_portfolio_text(formatted, results, as_of)
 
     holdings, accounts = consolidate(results, grand_total)
     result = build_briefing(
         holdings, accounts, grand_total, as_of, formatted, results=results,
-        live_build=live_build,
+        live_build=True,
     )
     dated, latest = save_briefing_result(result, formatted, as_of)
 

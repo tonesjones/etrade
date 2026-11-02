@@ -1685,9 +1685,9 @@ def main(argv=None) -> int:
     if clipped:
         print("Clipboard: portable portfolio copied — use it for offline briefing generation")
     else:
-        print(f"Clipboard: could not copy automatically — use --input-file {path}")
+        print(f"Clipboard: could not copy automatically; the dump is saved at {path}")
     print("-" * 50)
-    print("\nNext: run briefing.cmd to build the prompt from the clipboard payload.")
+    print("\nThis dump is for diagnostics.")
     return 0
 
 

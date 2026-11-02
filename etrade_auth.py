@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import webbrowser
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -85,6 +86,10 @@ def main(argv=None) -> int:
     auth_url = oauth.get_request_token()
     print("Open this URL, log in, and authorize the application:\n")
     print(auth_url)
+    try:
+        webbrowser.open(auth_url)
+    except Exception:
+        pass
     verifier = input("\nPaste the verification code: ").strip()
     if not verifier:
         raise ValueError("No verification code provided.")
