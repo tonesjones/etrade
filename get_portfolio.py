@@ -313,7 +313,10 @@ def parse_portable_portfolio_text(text: str):
 def read_clipboard_text() -> str:
     """Read the Windows clipboard as text."""
     completed = subprocess.run(
-        ["powershell", "-NoProfile", "-Command", "Get-Clipboard -Raw"],
+        [
+            "powershell", "-NoProfile", "-Command",
+            "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; Get-Clipboard -Raw",
+        ],
         check=True,
         capture_output=True,
     )
