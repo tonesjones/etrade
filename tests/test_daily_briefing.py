@@ -44,9 +44,10 @@ class DailyBriefingTests(unittest.TestCase):
             check_refreshed_credentials(Path(directory))
 
     def test_reply_identity(self):
-        prompt = 'Prompt\n```json\n{"briefing_id": "today"}\n```'
+        prompt = 'Prompt ≈ $1M · account …1234\n```json\n{"briefing_id": "today"}\n```'
         for text, expected in [
             (prompt + '\n', False),
+            (prompt.replace('≈', '÷').replace('·', 'ú').replace('…', '.'), False),
             ('```json\n{"briefing_id": "today"}\n```', True),
             ('{"briefing_id": "yesterday"}', False),
             ('No JSON here', False),

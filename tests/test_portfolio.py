@@ -106,6 +106,12 @@ class PortfolioParsingTests(unittest.TestCase):
         self.assertEqual(portfolio.read_clipboard_text(), payload)
 
     @patch.object(portfolio.subprocess, "run")
+    def test_clipboard_reader_requests_utf8_output(self, run):
+        run.return_value = SimpleNamespace(stdout="≈ …7810 ·".encode())
+        self.assertEqual(portfolio.read_clipboard_text(), "≈ …7810 ·")
+        self.assertIn("[System.Text.Encoding]::UTF8", run.call_args.args[0][-1])
+
+    @patch.object(portfolio.subprocess, "run")
     def test_clipboard_reader_rejects_missing_output(self, run):
         run.return_value = SimpleNamespace(stdout=None)
         with self.assertRaisesRegex(portfolio.PortfolioDataError, "clipboard"):

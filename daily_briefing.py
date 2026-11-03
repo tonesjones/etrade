@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -29,8 +30,12 @@ def authorization_needed(today: datetime | None = None) -> bool:
 
 
 def reply_briefing_id(text: str, prompt_text: str) -> str | None:
-    """Return the briefing_id of a copied reply, ignoring the copied prompt itself."""
-    if text.strip() == prompt_text.strip():
+    """Return the briefing_id of a copied reply, ignoring the copied prompt itself.
+
+    The prompt check compares letters and digits only, so a clipboard read that
+    garbles symbols such as ≈ or … still recognizes the prompt.
+    """
+    if re.sub(r"[^A-Za-z0-9]", "", text) == re.sub(r"[^A-Za-z0-9]", "", prompt_text):
         return None
     block = extract_json_block(text)
     if block is None:
