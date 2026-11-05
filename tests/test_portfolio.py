@@ -565,7 +565,7 @@ class BriefingPolicyTests(unittest.TestCase):
         self.assertIn("Crypto (" + " ".join(POLICY.sleeves["crypto"]) + ")", prompt)
         self.assertIn("Payments (" + " ".join(POLICY.sleeves["payments"]) + ")", prompt)
         self.assertIn("Broad index (" + " ".join(POLICY.sleeves["broad_index"]) + ")", prompt)
-        self.assertIn(f"work toward {POLICY.risk_off_glide_pct:g}%", prompt)
+        self.assertIn(f"sleeve toward **{POLICY.risk_off_glide_pct:g}%**", prompt)
         self.assertIn(
             f"weight ≥ {POLICY.analyze_weight_floor_pct:g}%",
             prompt,

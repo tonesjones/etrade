@@ -17,7 +17,12 @@ from argparse import ArgumentParser
 from datetime import date, datetime
 from pathlib import Path
 
-from build_briefing_prompt import consolidate, sleeve_stats, top5_noncash_weight
+from build_briefing_prompt import (
+    consolidate,
+    load_portfolio_context,
+    sleeve_stats,
+    top5_noncash_weight,
+)
 from get_portfolio import (
     LOT_QUANTITY_TOLERANCE,
     PortfolioDataError,
@@ -33,6 +38,7 @@ from get_portfolio import (
     to_et,
 )
 from portfolio_policy import active_policy, load_policy, set_active_policy
+from trim_rules import approved_exceptions
 from vault_notes import check_vault_dir, write_vault_note
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -220,6 +226,162 @@ def _check_names(checks: Checks, parsed: dict, meta: dict, as_of_date: date) -> 
                     f"{symbol}: source dated {d.isoformat()} is after the data date "
                     f"{as_of_date.isoformat()}",
                 )
+
+
+BINDING_RESPONSES = frozenset({"COMPLY", "EXCEPTION"})
+REVIEW_RESPONSES = frozenset({"TRIM", "HOLD"})
+REGIMES = frozenset({"RISK_ON", "NEUTRAL", "RISK_OFF"})
+# Whole-share trades can land a few cents under a dollar minimum.
+RULE_ROUNDING_DOLLARS = 1.0
+MIN_REASON_CHARS = 20
+
+
+def _evidence_problems(item: dict, as_of_date: date) -> list[str]:
+    """What a cited explanation lacks: a reason, and a source with a URL and a real date."""
+    problems = []
+    if len(str(item.get("reason") or "").strip()) < MIN_REASON_CHARS:
+        problems.append(f"a reason of at least {MIN_REASON_CHARS} characters")
+    sources = item.get("sources")
+    sources = [s for s in sources if isinstance(s, dict)] if isinstance(sources, list) else []
+    cited = [
+        s for s in sources
+        if str(s.get("url") or "").startswith(("https://", "http://"))
+        and (when := _valid_date(s.get("date"))) is not None
+        and when <= as_of_date
+    ]
+    if not cited:
+        problems.append(
+            "a source with an http(s) URL and a real YYYY-MM-DD date on or before the data date"
+        )
+    return problems
+
+
+def _net_sold(symbols: set[str], sells: list[dict], buys: list[dict]) -> float:
+    """Dollar reduction in the symbols after every proposed trade: sales minus buys."""
+    def total(trades):
+        return sum(
+            trade["record"].get("amount") or 0.0 for trade in trades
+            if trade["ticker"] in symbols and not trade["record"].get("cash_symbol")
+        )
+    return total(sells) - total(buys)
+
+
+def _check_regime(checks, parsed, sells, buys, policy, as_of_date) -> None:
+    regime = parsed.get("market_regime")
+    value = str(regime.get("regime") or "").upper() if isinstance(regime, dict) else ""
+    if value not in REGIMES:
+        checks.error(
+            "market_regime_missing",
+            f"market_regime.regime must be one of {sorted(REGIMES)}",
+        )
+        return
+    problems = _evidence_problems(regime, as_of_date)
+    if problems:
+        checks.error("market_regime_unsupported", "market_regime needs " + " and ".join(problems))
+    sleeve = set(policy.sleeves["direct_ai_semi"])
+    if value == "RISK_OFF" and _net_sold(sleeve, sells, buys) <= 0:
+        checks.warn(
+            "risk_off_without_sleeve_sale",
+            "RISK_OFF but the proposal does not reduce the direct AI/semi sleeve",
+        )
+
+
+def _check_rule_responses(checks, parsed, meta, sells, buys, as_of_date) -> list[dict]:
+    """Binding limits need COMPLY or an EXCEPTION request; reviews need TRIM or HOLD.
+
+    COMPLY and TRIM are checked on net exposure after all trades, so selling and
+    buying back the same name does not count. An EXCEPTION leaves the limit
+    unresolved until the owner approves it. Returns the answers that passed, which
+    are the only ones the decision history (and so the review cooldown) records.
+    """
+    valid: list[dict] = []
+    fired = [row for row in meta.get("rule_triggers") or [] if isinstance(row, dict)]
+    raw = parsed.get("rule_responses")
+    if raw is None:
+        raw = []
+    if not isinstance(raw, list):
+        checks.error("rule_responses_not_list", "\"rule_responses\" must be a list")
+        raw = []
+    responses = {
+        str(item.get("rule") or "").upper().strip(): item
+        for item in raw if isinstance(item, dict)
+    }
+    known = {str(row.get("rule_id")) for row in fired}
+    for rule_id in sorted(set(responses) - known):
+        checks.warn("rule_response_unknown", f"{rule_id}: no such rule fired in this briefing")
+    for row in fired:
+        rule_id = str(row.get("rule_id"))
+        label = f"{rule_id} {row.get('kind')} ({row.get('scope')})"
+        item = responses.get(rule_id)
+        if item is None:
+            checks.error("rule_response_missing", f"{label}: fired but has no rule_responses entry")
+            continue
+        allowed = BINDING_RESPONSES if row.get("binding", True) else REVIEW_RESPONSES
+        response = str(item.get("response") or "").upper().strip()
+        if response not in allowed:
+            checks.error(
+                "rule_response_invalid",
+                f"{label}: response {item.get('response')!r} is not "
+                f"{' or '.join(sorted(allowed))}",
+            )
+            continue
+        answer = {
+            "rule": rule_id, "kind": row.get("kind"), "scope": row.get("scope"),
+            "response": response, "reason": str(item.get("reason") or "").strip(),
+        }
+        if response in {"EXCEPTION", "HOLD"}:
+            problems = _evidence_problems(item, as_of_date)
+            if problems:
+                checks.error(
+                    "rule_reason_incomplete", f"{label}: {response} needs " + " and ".join(problems)
+                )
+                continue
+            if response == "EXCEPTION":
+                checks.warn(
+                    "binding_limit_unresolved",
+                    f"{label}: the model requests an exception; the limit stays unresolved "
+                    "until the owner approves it in portfolio_context.json limit_exceptions",
+                )
+            valid.append(answer)
+            continue
+        symbols = {str(s).upper() for s in row.get("symbols") or []}
+        net = _net_sold(symbols, sells, buys)
+        minimum = float(row.get("min_sell") or 0.0)
+        if net <= 0 or net < minimum - RULE_ROUNDING_DOLLARS:
+            checks.error(
+                "rule_trim_too_small",
+                f"{label}: {response} needs a net reduction of at least {_money(minimum)} in "
+                f"{', '.join(sorted(symbols))} after all trades; the proposal reduces it by "
+                f"{_money(net)}",
+            )
+            continue
+        valid.append(answer)
+    return valid
+
+
+def _check_hard_cap_after_buys(checks, buys, weights, policy, context, as_of_date) -> None:
+    """A purchase may not leave a name above the hard cap without an owner-approved exception."""
+    rules = policy.trim_rules
+    if rules is None:
+        return
+    approved = approved_exceptions(context, as_of_date.isoformat())
+    index_funds = set(policy.sleeves["broad_index"])
+    for ticker in sorted({buy["ticker"] for buy in buys} - index_funds):
+        after = weights["tickers"].get(ticker, {}).get("after", 0.0)
+        if after <= rules.single_name_hard_cap_pct:
+            continue
+        if ("HARD_CAP", ticker) in approved:
+            checks.warn(
+                "hard_cap_exception_used",
+                f"{ticker} would be {after:.2f}% after the trades; the owner approved a "
+                f"hard-cap exception until {approved[('HARD_CAP', ticker)]['approved_until']}",
+            )
+            continue
+        checks.error(
+            "hard_cap_exceeded_by_buy",
+            f"buying {ticker} leaves it at {after:.2f}% after the trades, above the "
+            f"{rules.single_name_hard_cap_pct:g}% hard cap",
+        )
 
 
 def _lot_label(lot: dict) -> str:
@@ -646,11 +808,13 @@ def _tax_summary(sells) -> dict:
 
 
 def validate_reply(
-    reply: str, meta: dict, results: list[dict], grand_total: float, as_of: datetime
+    reply: str, meta: dict, results: list[dict], grand_total: float, as_of: datetime,
+    context: dict | None = None,
 ):
     """Return (checks, parsed, computed). Never raises on bad model output."""
     checks = Checks()
     computed: dict = {
+        "rule_answers": [],
         "trades": [],
         "weights": None,
         "tax_summary": None,
@@ -711,6 +875,18 @@ def validate_reply(
     computed["weights"] = _check_weights(
         checks, sells, buys, grand_total, policy, results
     )
+    _check_hard_cap_after_buys(checks, buys, computed["weights"], policy, context, as_of_date)
+    if parsed.get("web_research") is True:
+        computed["rule_answers"] = _check_rule_responses(
+            checks, parsed, meta, sells, buys, as_of_date
+        )
+        if meta.get("regime_required"):
+            _check_regime(checks, parsed, sells, buys, policy, as_of_date)
+    elif meta.get("rule_triggers"):
+        checks.warn(
+            "rule_responses_deferred",
+            "rules fired but the reply did no web research; rerun with search to answer them",
+        )
     computed["tax_summary"] = _tax_summary(sells)
     computed["cash_available_by_account"] = available
     for trade in trades:
@@ -773,8 +949,13 @@ def record_accepted_response(
     meta: dict,
     engine: str,
     response_sha256: str,
+    rule_answers: list[dict] | None = None,
 ) -> None:
-    """Append validated model provenance without changing owner-maintained research."""
+    """Append validated model provenance without changing owner-maintained research.
+
+    ``rule_answers`` must be the answers validate_reply accepted; they start the
+    review cooldown, so unvalidated ones would silence a review nobody completed.
+    """
     context = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
     if not isinstance(context, dict):
         raise PortfolioDataError(f"{path} must contain a JSON object")
@@ -792,6 +973,19 @@ def record_accepted_response(
             f"{item.get('ticker', 'UNKNOWN')}: {item['trigger']}"
             for item in names if item.get("trigger")
         ]
+        rule_answers = list(rule_answers or [])
+        explanations = []
+        for answer in rule_answers:
+            rule_id, response = answer["rule"], answer["response"]
+            if response == "EXCEPTION":
+                actions.append(f"{rule_id} EXCEPTION REQUESTED (limit unresolved)")
+            else:
+                actions.append(f"{rule_id} {response}")
+            if response in {"EXCEPTION", "HOLD"}:
+                explanations.append(f"{rule_id} {response}: {answer['reason']}")
+        regime = parsed.get("market_regime")
+        if isinstance(regime, dict) and regime.get("regime"):
+            actions.append(f"regime {regime['regime']}")
         history.append({
             "record_id": record_key,
             "source_briefing_id": meta.get("briefing_id"),
@@ -802,9 +996,13 @@ def record_accepted_response(
             or "portfolio",
             "portfolio_action": "; ".join(actions) or "NO_ACTION",
             "decision_basis": "MODEL RECOMMENDATION — STRUCTURE VALIDATED ONLY",
+            **({"rationale": "; ".join(explanations)} if explanations else {}),
             "decision_trigger": "; ".join(triggers) or "UNKNOWN",
             "approval_state": "NOT APPROVED / NOT EXECUTED",
             "proposed_trades": parsed.get("trades") or [],
+            **({"rule_answers": [
+                {k: a[k] for k in ("rule", "kind", "scope", "response")} for a in rule_answers
+            ]} if rule_answers else {}),
         })
     if (
         meta.get("candidate_refresh_requested")
@@ -989,7 +1187,10 @@ def main(argv=None) -> int:
         print(f"Cannot import: {exc}", file=sys.stderr)
         return 2
 
-    checks, parsed, computed = validate_reply(reply, meta, results, grand_total, as_of)
+    context, _context_status = load_portfolio_context(CONTEXT_PATH)
+    checks, parsed, computed = validate_reply(
+        reply, meta, results, grand_total, as_of, context
+    )
     status = status_of(checks)
     md_path, json_path = save_response(
         reply, meta, args.engine, status, parsed, checks, computed, date_str
@@ -997,7 +1198,8 @@ def main(argv=None) -> int:
     if status == "ACCEPTED" and isinstance(parsed, dict):
         try:
             record_accepted_response(
-                CONTEXT_PATH, parsed, meta, args.engine, reply_hash(reply)
+                CONTEXT_PATH, parsed, meta, args.engine, reply_hash(reply),
+                computed["rule_answers"],
             )
         except (OSError, ValueError, PortfolioDataError) as exc:
             print(f"Cannot record accepted response continuity: {exc}", file=sys.stderr)

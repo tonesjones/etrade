@@ -14,7 +14,7 @@ import re
 import sys
 from argparse import ArgumentParser
 from collections import defaultdict
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, is_dataclass, replace
 from datetime import datetime
 from hashlib import sha256
 from pathlib import Path
@@ -55,7 +55,15 @@ from get_portfolio import (
     save_portfolio_block,
     term_from_lot,
 )
+from market_data import load_technicals
 from portfolio_policy import active_policy, load_policy, set_active_policy
+from trim_rules import (
+    TrimReview,
+    format_risk_signals,
+    format_rule_triggers,
+    load_snapshot_history,
+)
+from trim_rules import review as review_trim_rules
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 OUT_DIR = PROJECT_ROOT / "prompts"
@@ -83,6 +91,8 @@ def make_briefing_id(as_of: datetime, weights_snapshot: dict, identity: dict | N
 
 
 def _canonical_identity(value):
+    if is_dataclass(value) and not isinstance(value, type):
+        return _canonical_identity(vars(value))
     if isinstance(value, dict):
         return {key: _canonical_identity(item) for key, item in sorted(value.items())}
     if isinstance(value, (set, frozenset)):
@@ -835,6 +845,7 @@ def briefing_output_policy(
     prior_observation: dict | None,
     as_of: datetime,
     context: dict | None = None,
+    trim: TrimReview | None = None,
 ) -> BriefingOutputPolicy:
     """Choose compact daily output or expanded decision-day output."""
     weight_changes = _changed_weight_symbols(today_snap, prior_snap)
@@ -884,6 +895,13 @@ def briefing_output_policy(
             reasons[symbol].append(reason)
         priorities[symbol] = min(priorities.get(symbol, priority), priority)
 
+    if trim is not None:
+        for trigger in trim.triggers:
+            if trigger.kind == "SLEEVE":
+                for leg in trim.plans.get(trigger.rule_id) or ():
+                    add_reason(leg.symbol, f"in the {trigger.rule_id} sell plan", 0)
+            else:
+                add_reason(trigger.scope, f"{trigger.rule_id} {trigger.kind}", 0)
     cap = active_policy().single_name_cap_pct
     for row in breaches:
         add_reason(row["symbol"], f"above {cap:g}% single-name limit", 1)
@@ -941,8 +959,8 @@ def format_constraint_math(holdings, grand_total: float, cluster_mv: float) -> s
     if c40 > 0:
         lines.append(
             f"- Direct AI/semi: **{fmt_money(c40)}** to {active_policy().cluster_soft_cap_pct:g}%; "
-            f"**{fmt_money(c38)}** to {active_policy().cluster_do_not_increase_pct:g}%. Hold-above OK if only "
-            "lots are punitive ST; do not add."
+            f"**{fmt_money(c38)}** to {active_policy().cluster_do_not_increase_pct:g}%. Do not add. "
+            "Rule triggers show whether a cut is required and which shares are untaxed."
         )
     if not lines:
         return "- No single-name or cluster cap currently requires a sale."
@@ -1204,8 +1222,7 @@ def build_briefing(
 
     if cluster_w >= policy.cluster_soft_cap_pct:
         cluster_status = (
-            f"ABOVE {policy.cluster_soft_cap_pct:g}% ceiling — do not add; hold-above only "
-            "if cutting is punitive ST or no superior immediate deployment exists"
+            f"ABOVE {policy.cluster_soft_cap_pct:g}% ceiling — do not add; see Rule triggers"
         )
     elif cluster_w >= policy.cluster_do_not_increase_pct:
         cluster_status = f"at {policy.cluster_do_not_increase_pct:g}% do-not-increase — do not add"
@@ -1231,6 +1248,20 @@ def build_briefing(
     observed_delta = format_observed_delta(
         today_observation, prior_observation, prior_observation_label
     )
+    technicals, technicals_problems = load_technicals(
+        [h["symbol"] for h in holdings], as_of.date(), BRIEFINGS_DIR / "prices", fetch=live_build
+    )
+    trim = review_trim_rules(
+        holdings,
+        results,
+        grand_total,
+        cluster_mv,
+        load_snapshot_history(BRIEFINGS_DIR, today_snap),
+        as_of,
+        context,
+        technicals,
+        technicals_problems,
+    )
     output_policy = briefing_output_policy(
         holdings,
         harvest_reviews,
@@ -1241,6 +1272,7 @@ def build_briefing(
         prior_observation,
         as_of,
         context,
+        trim,
     )
     if manual_identity["coverage"] == "manual" and "SNPS" not in output_policy.material_symbols:
         output_policy = replace(
@@ -1273,7 +1305,8 @@ def build_briefing(
     continuity_rule = (
         "**Prior proposals.** For each proposal in the decision history, mark today's as "
         "UNCHANGED / MODIFIED / REVERSED / RESOLVED. MODIFIED or REVERSED needs a dated new fact "
-        "that invalidates an earlier assumption; a fresh look or a vaguely better outlook is not enough. "
+        "that invalidates an earlier assumption, a fired rule trigger, or a price move past an earlier "
+        "trigger; a fresh look or a vaguely better outlook is not enough. "
         "Treat a proposal as executed only when its approval state is EXECUTED CONFIRMED.\n\n"
         if has_decision_history(context)
         else ""
@@ -1344,6 +1377,8 @@ def build_briefing(
         index_weight=fmt_weight(voo_w),
         index_value=fmt_money(voo_mv),
         options_note=options_note,
+        risk_signal_block=format_risk_signals(trim, holdings),
+        rule_trigger_block=format_rule_triggers(trim),
         constraint_math=constraint_math,
         account_lines=account_lines,
         holdings_table=holdings_table,
@@ -1371,6 +1406,8 @@ def build_briefing(
             "monitor_symbols": list(output_policy.monitor_symbols),
             "candidate_refresh_requested": output_policy.refresh_candidates,
             "manual_supplement": manual_identity,
+            "rule_triggers": [trigger.to_meta() for trigger in trim.triggers],
+            "regime_required": True,
         },
     )
 
