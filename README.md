@@ -31,7 +31,15 @@ Each holding in the prompt carries E\*TRADE's price paid, cost per share, total 
    ETRADE_DEV=false
    ```
 
-4. Run `.\daily.cmd` as described in [Daily workflow](#daily-workflow). It prompts you to authorize the app when needed.
+4. To turn on the stretched-winner reviews, add a free Tiingo key. Sign up at [tiingo.com](https://www.tiingo.com), copy the API token from your account page, and add it to `.env`:
+
+   ```env
+   TIINGO_API_KEY=...
+   ```
+
+   Each live build fetches about 400 days of daily closes per held ticker, plus SPY, QQQ and SMH. It caches them for the day in `briefings/prices/`. From those closes it computes the 50- and 200-day averages, RSI, and the distance from the 52-week high. The key goes in a request header, never in the URL. Without a key, the build still runs. The prompt then shows a "Technicals missing" line, and no STRETCHED review fires.
+
+5. Run `.\daily.cmd` as described in [Daily workflow](#daily-workflow). It prompts you to authorize the app when needed.
 
 The scripts pull every active account by default. To pull one account only, set `ETRADE_ACCOUNT_ID_KEY` in `.env`.
 

@@ -205,9 +205,9 @@ def _check_names(checks: Checks, parsed: dict, meta: dict, as_of_date: date) -> 
             checks.error("missing_focus_name", f"focus name {symbol} has no entry in names")
             continue
         view, action = entry.get("view"), entry.get("action")
-        if view not in VIEWS:
+        if not isinstance(view, str) or view not in VIEWS:
             checks.error("invalid_view", f"{symbol}: view {view!r} is not one of {sorted(VIEWS)}")
-        if action not in ACTIONS:
+        if not isinstance(action, str) or action not in ACTIONS:
             checks.error(
                 "invalid_action", f"{symbol}: action {action!r} is not one of {sorted(ACTIONS)}"
             )
@@ -608,7 +608,7 @@ def _check_trades(checks, parsed, results, as_of, holdings_by_symbol):
     structurally_ok: list[dict] = []
     for trade in trades:
         tid = trade["id"]
-        if trade["side"] not in SIDES:
+        if not isinstance(trade["side"], str) or trade["side"] not in SIDES:
             checks.error("invalid_side", f"{tid}: side {trade['side']!r} is not SELL or BUY")
             continue
         if not trade["ticker"]:

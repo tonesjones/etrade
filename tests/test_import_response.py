@@ -199,6 +199,18 @@ class ImportResponseTests(unittest.TestCase):
         checks, _p, _c = self.validate(reply_text(names_list=late))
         self.assertEqual(self.codes(checks), ["source_after_as_of"])
 
+    def test_unhashable_enum_values_are_rejected_not_crashed(self):
+        bad = names()
+        bad[0].update(view={"x": 1}, action=[])
+        checks, _p, _c = self.validate(reply_text(trades=[sell(side=[])], names_list=bad))
+        self.assertEqual(
+            sorted(self.codes(checks, "ERROR")), ["invalid_action", "invalid_side", "invalid_view"]
+        )
+        _code, out = self.run_import(reply_text(trades=[sell(side=[])], names_list=bad))
+        self.assertIn("REJECTED", out)
+        saved = json.loads((self.responses / "2026-09-18_claude.json").read_text(encoding="utf-8"))
+        self.assertEqual(saved["status"], "REJECTED")
+
     def test_sell_over_lot_quantity_is_an_error(self):
         checks, _p, _c = self.validate(reply_text([sell(quantity=6)]))
         self.assertIn("sell_exceeds_holding", self.codes(checks, "ERROR"))
