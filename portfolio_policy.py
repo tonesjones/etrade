@@ -11,6 +11,57 @@ DEFAULT_POLICY_PATH = PROJECT_ROOT / "portfolio_policy.json"
 
 
 @dataclass(frozen=True)
+class TrimRules:
+    """Owner-set hard limits and review thresholds for the briefing."""
+
+    sleeve_breach_enforce_days: int
+    single_name_hard_cap_pct: float
+    rebalance_target_pct: float
+    stretch_rsi: float
+    stretch_above_sma50_pct: float
+    stretch_above_sma200_pct: float
+    repeat_days: int
+    short_term_tax_rate: float
+    long_term_tax_rate: float
+
+
+def _positive(raw: dict, key: str, kind=float, upper: float | None = None):
+    value = raw.get(key)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"trim_rules.{key} must be a number")
+    if kind is int and value != int(value):
+        raise ValueError(f"trim_rules.{key} must be a whole number")
+    if value <= 0 or (upper is not None and value > upper):
+        limit = f" and at most {upper:g}" if upper is not None else ""
+        raise ValueError(f"trim_rules.{key} must be above 0{limit}")
+    return kind(value)
+
+
+def load_trim_rules(raw: dict | None) -> TrimRules | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ValueError("trim_rules must be an object")
+    stretch = raw.get("stretch")
+    if not isinstance(stretch, dict):
+        raise ValueError("trim_rules.stretch must be an object")
+    tax = raw.get("tax_rates")
+    if not isinstance(tax, dict):
+        raise ValueError("trim_rules.tax_rates must be an object")
+    return TrimRules(
+        sleeve_breach_enforce_days=_positive(raw, "sleeve_breach_enforce_days", int),
+        single_name_hard_cap_pct=_positive(raw, "single_name_hard_cap_pct", upper=100),
+        rebalance_target_pct=_positive(raw, "rebalance_target_pct", upper=100),
+        stretch_rsi=_positive(stretch, "rsi", upper=100),
+        stretch_above_sma50_pct=_positive(stretch, "above_sma50_pct"),
+        stretch_above_sma200_pct=_positive(stretch, "above_sma200_pct"),
+        repeat_days=_positive(raw, "repeat_days", int),
+        short_term_tax_rate=_positive(tax, "short_term", upper=1),
+        long_term_tax_rate=_positive(tax, "long_term", upper=1),
+    )
+
+
+@dataclass(frozen=True)
 class PortfolioPolicy:
     schema_version: int
     single_name_cap_pct: float
@@ -29,6 +80,7 @@ class PortfolioPolicy:
     aliases: dict[str, str]
     marginal_examples: tuple[tuple[str, str | None, str], ...]
     max_focus_names: int = 8
+    trim_rules: TrimRules | None = None
 
 
 def load_policy(path: Path = DEFAULT_POLICY_PATH) -> PortfolioPolicy:
@@ -77,6 +129,7 @@ def load_policy(path: Path = DEFAULT_POLICY_PATH) -> PortfolioPolicy:
         aliases={str(k).upper(): str(v) for k, v in (raw.get("aliases") or {}).items()},
         marginal_examples=tuple(examples),
         max_focus_names=max_focus_names,
+        trim_rules=load_trim_rules(raw.get("trim_rules")),
     )
 
 

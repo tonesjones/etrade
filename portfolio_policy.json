@@ -12,7 +12,15 @@
   "risk_off_glide_pct": 35.0,
   "st_gain_flag_dollars": 500.0,
   "lt_gain_flag_dollars": 2000.0,
-  "cash_symbols": ["CASH", "SGOV", "BIL", "SGOVX"],
+  "trim_rules": {
+    "sleeve_breach_enforce_days": 5,
+    "single_name_hard_cap_pct": 20.0,
+    "rebalance_target_pct": 15.0,
+    "stretch": {"rsi": 70.0, "above_sma50_pct": 20.0, "above_sma200_pct": 40.0},
+    "repeat_days": 7,
+    "tax_rates": {"short_term": 0.333, "long_term": 0.243}
+  },
+  "cash_symbols":["CASH", "SGOV", "BIL", "SGOVX"],
   "sleeves": {
     "direct_ai_semi": ["AMD", "MU", "NVDA", "TSM", "CRWV", "NBIS"],
     "broad_ai_cycle": ["AMD", "MU", "NVDA", "TSM", "CRWV", "NBIS", "GOOGL", "MSFT", "META", "AMZN", "CEG"],

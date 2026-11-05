@@ -171,6 +171,7 @@ class ManualSupplementTests(unittest.TestCase):
                 }),
             ]
             with patches[0], patches[1], patches[2], \
+                 patch.object(briefing, "load_technicals", return_value=({}, [])), \
                  patch.object(briefing, "fetch_snps_quote", return_value=quote_result,
                               side_effect=quote_error) as fetch_quote:
                 result = briefing.build_briefing(

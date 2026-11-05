@@ -222,6 +222,85 @@ def _check_names(checks: Checks, parsed: dict, meta: dict, as_of_date: date) -> 
                 )
 
 
+BINDING_RESPONSES = frozenset({"COMPLY", "OVERRIDE"})
+REVIEW_RESPONSES = frozenset({"TRIM", "HOLD"})
+REGIMES = frozenset({"RISK_ON", "NEUTRAL", "RISK_OFF"})
+# Lets a whole-share sale that rounds a few dollars under the minimum still count.
+RULE_SELL_TOLERANCE = 0.98
+_ANY_DATE_RE = re.compile(r"\b\d{4}-\d{2}-\d{2}\b")
+
+
+def _check_regime(checks: Checks, parsed: dict, sells: list[dict], policy) -> None:
+    regime = parsed.get("market_regime")
+    value = str(regime.get("regime") or "").upper() if isinstance(regime, dict) else ""
+    if value not in REGIMES:
+        checks.error(
+            "market_regime_missing",
+            f"market_regime.regime must be one of {sorted(REGIMES)}",
+        )
+        return
+    sleeve = set(policy.sleeves["direct_ai_semi"])
+    if value == "RISK_OFF" and not any(sell["ticker"] in sleeve for sell in sells):
+        checks.warn(
+            "risk_off_without_sleeve_sale",
+            "RISK_OFF but no SELL in the direct AI/semi sleeve",
+        )
+
+
+def _check_rule_responses(checks: Checks, parsed: dict, meta: dict, sells: list[dict]) -> None:
+    """Binding limits need COMPLY or a dated OVERRIDE; reviews need TRIM or a dated HOLD."""
+    fired = [row for row in meta.get("rule_triggers") or [] if isinstance(row, dict)]
+    raw = parsed.get("rule_responses")
+    if raw is None:
+        raw = []
+    if not isinstance(raw, list):
+        checks.error("rule_responses_not_list", "\"rule_responses\" must be a list")
+        raw = []
+    responses = {
+        str(item.get("rule") or "").upper().strip(): item
+        for item in raw if isinstance(item, dict)
+    }
+    known = {str(row.get("rule_id")) for row in fired}
+    for rule_id in sorted(set(responses) - known):
+        checks.warn("rule_response_unknown", f"{rule_id}: no such rule fired in this briefing")
+    for row in fired:
+        rule_id = str(row.get("rule_id"))
+        label = f"{rule_id} {row.get('kind')} ({row.get('scope')})"
+        item = responses.get(rule_id)
+        if item is None:
+            checks.error("rule_response_missing", f"{label}: fired but has no rule_responses entry")
+            continue
+        allowed = BINDING_RESPONSES if row.get("binding", True) else REVIEW_RESPONSES
+        response = str(item.get("response") or "").upper().strip()
+        if response not in allowed:
+            checks.error(
+                "rule_response_invalid",
+                f"{label}: response {item.get('response')!r} is not "
+                f"{' or '.join(sorted(allowed))}",
+            )
+            continue
+        if response in {"OVERRIDE", "HOLD"}:
+            reason = str(item.get("reason") or "").strip()
+            if not _ANY_DATE_RE.search(reason):
+                checks.error(
+                    "rule_override_undated",
+                    f"{label}: {response} needs a reason citing a dated fact (YYYY-MM-DD)",
+                )
+            continue
+        symbols = {str(s).upper() for s in row.get("symbols") or []}
+        sold = sum(
+            sell["record"]["amount"] for sell in sells
+            if sell["ticker"] in symbols and not sell["record"].get("cash_symbol")
+        )
+        minimum = float(row.get("min_sell") or 0.0)
+        if sold <= 0 or sold < minimum * RULE_SELL_TOLERANCE:
+            checks.error(
+                "rule_trim_too_small",
+                f"{label}: {response} needs SELL trades of at least {_money(minimum)} in "
+                f"{', '.join(sorted(symbols))}; the proposal sells {_money(sold)}",
+            )
+
+
 def _lot_label(lot: dict) -> str:
     return to_et(lot["acquired"]).date().isoformat() if lot.get("acquired") else "unknown date"
 
@@ -711,6 +790,15 @@ def validate_reply(
     computed["weights"] = _check_weights(
         checks, sells, buys, grand_total, policy, results
     )
+    if parsed.get("web_research") is True:
+        _check_rule_responses(checks, parsed, meta, sells)
+        if meta.get("regime_required"):
+            _check_regime(checks, parsed, sells, policy)
+    elif meta.get("rule_triggers"):
+        checks.warn(
+            "rule_responses_deferred",
+            "rules fired but the reply did no web research; rerun with search to answer them",
+        )
     computed["tax_summary"] = _tax_summary(sells)
     computed["cash_available_by_account"] = available
     for trade in trades:
@@ -792,6 +880,20 @@ def record_accepted_response(
             f"{item.get('ticker', 'UNKNOWN')}: {item['trigger']}"
             for item in names if item.get("trigger")
         ]
+        rule_responses = [
+            item for item in parsed.get("rule_responses") or [] if isinstance(item, dict)
+        ]
+        actions.extend(
+            f"{item.get('rule', '?')} {item.get('response', '?')}" for item in rule_responses
+        )
+        overrides = [
+            f"{item.get('rule', '?')} {str(item.get('response')).upper()}: {item.get('reason', '')}"
+            for item in rule_responses
+            if str(item.get("response") or "").upper() in {"OVERRIDE", "HOLD"}
+        ]
+        regime = parsed.get("market_regime")
+        if isinstance(regime, dict) and regime.get("regime"):
+            actions.append(f"regime {regime['regime']}")
         history.append({
             "record_id": record_key,
             "source_briefing_id": meta.get("briefing_id"),
@@ -802,6 +904,7 @@ def record_accepted_response(
             or "portfolio",
             "portfolio_action": "; ".join(actions) or "NO_ACTION",
             "decision_basis": "MODEL RECOMMENDATION — STRUCTURE VALIDATED ONLY",
+            **({"rationale": "; ".join(overrides)} if overrides else {}),
             "decision_trigger": "; ".join(triggers) or "UNKNOWN",
             "approval_state": "NOT APPROVED / NOT EXECUTED",
             "proposed_trades": parsed.get("trades") or [],
