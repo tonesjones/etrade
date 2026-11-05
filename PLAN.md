@@ -59,6 +59,39 @@ Done when:
 Done when:
 - Import tests cover missing answers, a sale bought back in the same proposal, the rounding allowance, TRIM with no net sale, EXCEPTION and HOLD without full evidence, and briefings with no saved items (unchanged behavior).
 
+### 5. Malformed replies are rejected, not crashed on
+
+`_check_names` tests `view` and `action` with `in VIEWS` / `in ACTIONS`, and the trade check tests `side` with `in SIDES`. An unhashable value such as `"action": []` raises TypeError, so the importer exits before it saves its report. Check that each value is a string before the set lookup. The regime and rule-response checks already convert to `str` first and are safe.
+
+Done when:
+- A reply with a list or dict in `view`, `action` or `side` imports as REJECTED with a named error, and the report is saved.
+- Tests cover each of the three fields.
+
+### 6. The briefing ID covers what the reply is checked against
+
+`make_briefing_id` hashes the portfolio, policy, context, supplement, weights and observations, but not the technicals or the fired rule items. Two builds with the same holdings and different technicals get the same ID. The second build overwrites the first one's metadata, so a reply to the first prompt is checked against the second prompt's rules. Add the fired rule items (`trim`), the focus list (`output_policy`) and the technicals to the identity.
+
+Done when:
+- A test builds twice from the same portfolio with different technicals that change the fired rules, and gets two different IDs.
+- Two builds from identical inputs still get the same ID.
+
+### 7. README covers the Tiingo setup
+
+The README doesn't mention Tiingo. Add the free-key step, the `TIINGO_API_KEY` line in `.env`, the `briefings/prices/` cache, and what the prompt shows when the key is missing.
+
+Done when:
+- A new user can set up technicals from the README alone.
+
+### 8. Cleanup (nice later)
+
+- Delete `tax_bucket_label()` and `format_taxable_cost_table()`. Nothing calls them, not even tests.
+- `collect_tax_flags()`, `build_prompt()` and `is_reply_for()` are called only from tests. Either move those tests to the production entry points and delete the functions, or leave them.
+- `portfolio_policy.POLICY` is still used by `tests/test_money_math.py` and `tests/test_portfolio.py`. Move those tests to `load_policy()` before deleting it.
+- `get_portfolio.py` imports `requests` directly, but only `pyetrade` installs it. Declare `requests` explicitly.
+- Keep the dependency list in `pyproject.toml` only, and make `requirements.txt` install `-e .` or delete it.
+- Move the repeated lot fallback in the importer, the trim rules and the briefing formatting into one shared helper.
+- Delete the local `feat/trim-rules` and `fix/clipboard-prompt-import` branches, their remote branches, and `Etrade-feat-trim-rules.bundle`. PR #9 is merged, so nothing depends on the bundle.
+
 ## Status
 
 - 2026-11-02: one-window `daily.cmd`, offline build removed, docs updated (PRs #6 to #8).
@@ -66,6 +99,7 @@ Done when:
 - 2026-11-05: items 1 to 4 built on `feat/trim-rules`. 273 tests pass and ruff is clean. A replay of a saved snapshot fires the sleeve rule and a rebalance review as expected. STRETCHED is unverified against live Tiingo data until a key is set.
 - 2026-11-05: review fixes on PR #9: net-exposure compliance, cooldown after an accepted answer, stale technicals kept out of reviews, unknown tax kept unknown, owner-approved exceptions, a balanced HOLD, and evidence checks. 276 tests pass.
 - 2026-11-05: second review on PR #9: a hard-cap check on buys after all trades, and the cooldown counts only validated answers. 278 tests pass.
+- 2026-11-05: items 5 to 7 built on `fix/review-followups`. 282 tests pass and ruff is clean. Item 8 and the open decisions are still open.
 - The repo is public. Keep portfolio values, weights and dollar amounts out of this file, commits and PR text.
 
 ## Next
@@ -74,5 +108,12 @@ Done when:
 - Owner reviews the stretch thresholds in `portfolio_policy.json`. The shipped values are placeholders.
 
 ## Open decisions
+
+From the post-#9 review. These are policy questions for the owner, not bugs:
+- A single name above the hard cap must be cut back to the 15% target, not just to the cap. Is the larger cut intended?
+- Sleeve enforcement counts saved snapshots above the ceiling, not consecutive trading days. Skipped days don't reset the count.
+- At or above the no-add level, every direct-sleeve buy is rejected, even inside a rotation that cuts the sleeve overall.
+- An EXCEPTION reply can still import as ACCEPTED with an unresolved-limit warning. Would a separate "needs owner decision" status be better?
+- The tax rates are fixed estimates in the policy file, not verified tax figures.
 
 - Later, if copying and pasting still costs too much time: call a model API with web search instead of the chat window (per-run cost, different data-retention terms).

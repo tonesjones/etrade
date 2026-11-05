@@ -13,6 +13,7 @@ import build_briefing_prompt as briefing
 import daily_briefing
 import get_portfolio as portfolio
 import import_response as imp
+from market_data import Technicals
 from portfolio_policy import load_policy, set_active_policy
 
 ET = ZoneInfo("America/New_York")
@@ -565,6 +566,38 @@ class IdentityAndNewlineTests(unittest.TestCase):
         text_lf = "Analysis\n\n```json\n{}\n```\n"
         self.assertEqual(imp.normalize_newlines(text_lf.replace("\n", "\r\n")), text_lf)
         self.assertEqual(imp.reply_hash(text_lf), imp.reply_hash(text_lf.replace("\n", "\r\n")))
+
+
+class BriefingIdentityTests(unittest.TestCase):
+    def _build(self, rsi):
+        aaa = holding("AAA", 100, 1000) | {"total_gain": 20000.0}
+        cash = holding("CASH", 900000, 1)
+        holdings = [aaa | {"weight": 10.0}, cash | {"weight": 90.0}]
+        tech = Technicals("AAA", 1000.0, "2026-10-20", 5.0, 10.0, rsi, -2.0, 3.0, 8.0)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with (
+                patch.object(briefing, "BRIEFINGS_DIR", root / "briefings"),
+                patch.object(briefing, "OUT_DIR", root / "prompts"),
+                patch.object(briefing, "load_manual_holdings", return_value=None),
+                patch.object(briefing, "load_technicals", return_value=({"AAA": tech}, [])),
+                patch.object(briefing, "fetch_snps_quote", return_value=None),
+            ):
+                return briefing.build_briefing(
+                    holdings, [], 1000000, AS_OF, "", results=api_results(aaa, cash),
+                    live_build=False,
+                )
+
+    def test_technicals_that_change_the_rules_change_the_id(self):
+        calm, stretched = self._build(rsi=50.0), self._build(rsi=80.0)
+        self.assertIn("STRETCHED", [t["kind"] for t in stretched.meta["rule_triggers"]])
+        self.assertNotIn("STRETCHED", [t["kind"] for t in calm.meta["rule_triggers"]])
+        self.assertNotEqual(calm.meta["briefing_id"], stretched.meta["briefing_id"])
+
+    def test_identical_inputs_keep_the_same_id(self):
+        self.assertEqual(
+            self._build(rsi=80.0).meta["briefing_id"], self._build(rsi=80.0).meta["briefing_id"]
+        )
 
 
 class DailyLauncherTests(unittest.TestCase):

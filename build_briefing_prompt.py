@@ -1336,6 +1336,9 @@ def build_briefing(
             "manual_supplement": manual_identity,
             "weights": today_snap,
             "observations": today_observation,
+            # Technicals and fired rules decide what the reply is validated against.
+            "trim": _canonical_identity(trim),
+            "focus": _canonical_identity(output_policy),
         },
     )
     prompt = render_prompt_template(
