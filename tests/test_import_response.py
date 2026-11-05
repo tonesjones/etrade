@@ -4,11 +4,13 @@ import os
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
 import get_portfolio as portfolio
 import import_response as imp
+from portfolio_policy import load_policy, set_active_policy
 
 FIXTURE = Path(__file__).parent / "fixtures" / "portable_portfolio.txt"
 BRIEFING_ID = "brief-test-1"
@@ -90,6 +92,10 @@ def reply_text(trades=None, *, briefing_id=BRIEFING_ID, web_research=True, names
 
 class ImportResponseTests(unittest.TestCase):
     def setUp(self):
+        # Every name in the small fixture is about a third of the book, so any buy would
+        # breach the hard cap; these tests cover import mechanics with the trim rules off.
+        previous = set_active_policy(replace(load_policy(), trim_rules=None))
+        self.addCleanup(set_active_policy, previous)
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         root = Path(self._tmp.name)

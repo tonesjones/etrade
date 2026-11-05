@@ -467,16 +467,68 @@ class RuleResponseImportTests(unittest.TestCase):
         self.assertEqual(self.codes(checks, "ERROR"), [])
         self.assertIn("rule_responses_deferred", self.codes(checks, "WARN"))
 
+    def validate_with(self, reply, context):
+        _f, total, _n, results, as_of = tir.portfolio.parse_portable_portfolio_text(
+            (self.briefings / "portfolio_2026-09-18.txt").read_text(encoding="utf-8")
+        )
+        meta = json.loads((self.briefings / "briefing_latest.json").read_text(encoding="utf-8"))
+        return tir.imp.validate_reply(reply, meta, results, total, as_of, context)
+
+    def test_buy_above_the_hard_cap_needs_an_owner_exception(self):
+        set_active_policy(load_policy())
+        new_name = [tir.buy(ticker="NEW", quantity=5, est_price=100.0)]
+        checks, _p, _c = self.validate_with(self.reply(new_name), {})
+        self.assertIn("hard_cap_exceeded_by_buy", self.codes(checks, "ERROR"))
+        checks, _p, _c = self.validate_with(self.reply([tir.buy(ticker="BBB", quantity=1)]), {})
+        self.assertIn("hard_cap_exceeded_by_buy", self.codes(checks, "ERROR"))
+        for until, allowed in (("2026-09-30", True), ("2026-09-17", False)):
+            with self.subTest(until=until):
+                context = {"limit_exceptions": [
+                    {"kind": "HARD_CAP", "scope": "NEW", "approved_until": until},
+                ]}
+                checks, _p, _c = self.validate_with(self.reply(new_name), context)
+                errors = self.codes(checks, "ERROR")
+                self.assertEqual("hard_cap_exceeded_by_buy" not in errors, allowed)
+                self.assertEqual("hard_cap_exception_used" in self.codes(checks, "WARN"),
+                                 allowed)
+
+    def test_only_validated_answers_start_the_cooldown(self):
+        self.fire(min_sell=0.0, kind="STRETCHED")
+        bare_hold = [{"rule": "R1", "response": "HOLD"}]
+        no_names = [{"ticker": t, "view": "INSUFFICIENT_EVIDENCE", "action": "NO_ACTION"}
+                    for t in ("AAA", "BBB")]
+        payload = json.loads(tir.imp.extract_json_block(
+            tir.reply_text([], web_research=False, names_list=no_names)
+        ))
+        payload["rule_responses"] = bare_hold
+        unresearched = "```json\n" + json.dumps(payload) + "\n```\n"
+        checks, _p, computed = self.validate(unresearched)
+        self.assertEqual(self.codes(checks, "ERROR"), [])
+        self.assertEqual(computed["rule_answers"], [])
+        _checks, _p, computed = self.validate(self.reply([], bare_hold))
+        self.assertEqual(computed["rule_answers"], [])
+        hold = [{"rule": "R1", "response": "HOLD", "reason": REASON, "sources": SOURCE}]
+        _checks, _p, computed = self.validate(self.reply([], hold))
+        self.assertEqual(
+            [(a["kind"], a["scope"], a["response"]) for a in computed["rule_answers"]],
+            [("STRETCHED", "AAA", "HOLD")],
+        )
+        meta = {"briefing_id": "b", "as_of": "2026-09-18"}
+        tir.imp.record_accepted_response(self.context, payload, meta, "claude", "x", [])
+        context = json.loads(self.context.read_text(encoding="utf-8"))
+        self.assertNotIn("rule_answers", context["decision_history"][-1])
+        self.assertEqual(tr.answered_reviews(context, "2026-09-20"), {})
+
     def test_answers_reach_the_decision_history_with_kind_and_scope(self):
-        parsed = {"names": [], "rule_responses": [
-            {"rule": "R1", "response": "EXCEPTION", "reason": REASON, "sources": SOURCE},
-            {"rule": "R2", "response": "HOLD", "reason": REASON, "sources": SOURCE},
-        ]}
-        meta = {"briefing_id": "b", "as_of": "2026-09-18", "rule_triggers": [
-            {"rule_id": "R1", "kind": "SLEEVE", "scope": "direct_ai_semi"},
-            {"rule_id": "R2", "kind": "STRETCHED", "scope": "AAA"},
-        ]}
-        tir.imp.record_accepted_response(self.context, parsed, meta, "claude", "h")
+        parsed = {"names": []}
+        answers = [
+            {"rule": "R1", "kind": "SLEEVE", "scope": "direct_ai_semi",
+             "response": "EXCEPTION", "reason": REASON},
+            {"rule": "R2", "kind": "STRETCHED", "scope": "AAA", "response": "HOLD",
+             "reason": REASON},
+        ]
+        meta = {"briefing_id": "b", "as_of": "2026-09-18"}
+        tir.imp.record_accepted_response(self.context, parsed, meta, "claude", "h", answers)
         entry = json.loads(self.context.read_text(encoding="utf-8"))["decision_history"][-1]
         self.assertIn("R1 EXCEPTION REQUESTED (limit unresolved)", entry["portfolio_action"])
         self.assertIn("R2 HOLD", entry["portfolio_action"])

@@ -3,6 +3,7 @@
 import json
 import tempfile
 import unittest
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -12,6 +13,7 @@ import build_briefing_prompt as briefing
 import daily_briefing
 import get_portfolio as portfolio
 import import_response as imp
+from portfolio_policy import load_policy, set_active_policy
 
 ET = ZoneInfo("America/New_York")
 AS_OF = datetime(2026, 10, 21, 9, 30, tzinfo=ET)
@@ -232,6 +234,11 @@ class ManualSupplementTests(unittest.TestCase):
         self.assertIsNone(offline_result.meta["manual_supplement"]["price"])
 
 class FundingTests(unittest.TestCase):
+    def setUp(self):
+        # Single-name test books put every buy over the hard cap; funding is tested alone.
+        previous = set_active_policy(replace(load_policy(), trim_rules=None))
+        self.addCleanup(set_active_policy, previous)
+
     def check(self, trades, holdings, total=None):
         results = api_results(*holdings)
         total = total or results[0]["total_value"]

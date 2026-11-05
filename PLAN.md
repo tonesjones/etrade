@@ -54,7 +54,7 @@ Done when:
 
 ### 4. Import checks
 
-`import_response.py` checks each COMPLY and TRIM against net exposure after all proposed trades, with a $1 rounding allowance. It records each answer's kind and scope, and the EXCEPTION and HOLD reasons, in the decision history.
+`import_response.py` checks each COMPLY and TRIM against net exposure after all proposed trades, with a $1 rounding allowance. It rejects any buy that leaves a non-index name above the hard cap, unless the owner approved a `HARD_CAP` exception for that ticker in `limit_exceptions`. Only answers that passed validation in a researched reply reach the decision history, with their kind, scope and reasons, so only they start the review cooldown.
 
 Done when:
 - Import tests cover missing answers, a sale bought back in the same proposal, the rounding allowance, TRIM with no net sale, EXCEPTION and HOLD without full evidence, and briefings with no saved items (unchanged behavior).
@@ -65,6 +65,7 @@ Done when:
 - 2026-11-05: first version of the rules built on `feat/trim-rules` (mechanical drawdown and gain trims). The owner redirected the design the same day, and items 1 to 4 replace that version.
 - 2026-11-05: items 1 to 4 built on `feat/trim-rules`. 273 tests pass and ruff is clean. A replay of a saved snapshot fires the sleeve rule and a rebalance review as expected. STRETCHED is unverified against live Tiingo data until a key is set.
 - 2026-11-05: review fixes on PR #9: net-exposure compliance, cooldown after an accepted answer, stale technicals kept out of reviews, unknown tax kept unknown, owner-approved exceptions, a balanced HOLD, and evidence checks. 276 tests pass.
+- 2026-11-05: second review on PR #9: a hard-cap check on buys after all trades, and the cooldown counts only validated answers. 278 tests pass.
 - The repo is public. Keep portfolio values, weights and dollar amounts out of this file, commits and PR text.
 
 ## Next
