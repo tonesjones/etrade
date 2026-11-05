@@ -71,8 +71,8 @@ class TrimRuleTestCase(unittest.TestCase):
         set_active_policy(replace(policy, trim_rules=replace(policy.trim_rules, **changes)))
 
     def review(self, holdings, history, results=(), total=1_000_000.0, cluster_mv=0.0,
-               technicals=None):
-        return tr.review(holdings, list(results), total, cluster_mv, history, AS_OF, self.root,
+               technicals=None, context=None):
+        return tr.review(holdings, list(results), total, cluster_mv, history, AS_OF, context,
                          technicals or {})
 
 
@@ -207,19 +207,50 @@ class TriggerTests(TrimRuleTestCase):
         self.assertIn("RSI 75 (≥ 70)", item.detail)
         self.assertIn("+45% vs 200-day (≥ 40%)", item.detail)
 
-    def test_reviews_wait_out_the_repeat_window(self):
+    def test_reviews_rest_only_after_an_accepted_answer(self):
         rows = [holding("AAA", 160_000, 16.0, gain=10_000)]
         technicals = {"AAA": tech("AAA", rsi=80)}
         first = self.review(rows, [snap("2026-11-05")], technicals=technicals)
         self.assertEqual([t.kind for t in first.triggers], ["REBALANCE", "STRETCHED"])
-        meta = {"rule_triggers": [t.to_meta() for t in first.triggers]}
-        for fired_on, expected in (("2026-11-01", 0), ("2026-10-29", 2)):
-            with self.subTest(fired_on=fired_on):
-                path = self.root / f"briefing_{fired_on}.json"
-                path.write_text(json.dumps(meta))
-                again = self.review(rows, [snap("2026-11-05")], technicals=technicals)
+        # A saved prompt with no accepted answer does not start the cooldown.
+        (self.root / "briefing_2026-11-01.json").write_text(
+            json.dumps({"rule_triggers": [t.to_meta() for t in first.triggers]})
+        )
+        self.assertEqual(len(self.review(rows, [snap("2026-11-05")],
+                                         technicals=technicals).triggers), 2)
+        answers = [{"rule": t.rule_id, "kind": t.kind, "scope": t.scope, "response": "HOLD"}
+                   for t in first.triggers]
+        for answered_on, expected in (("2026-11-01", 0), ("2026-10-29", 2), ("2026-11-05", 2)):
+            with self.subTest(answered_on=answered_on):
+                context = {"decision_history": [
+                    {"as_of": answered_on, "rule_answers": answers}, "junk",
+                ]}
+                again = self.review(rows, [snap("2026-11-05")], technicals=technicals,
+                                    context=context)
                 self.assertEqual(len(again.triggers), expected)
-                path.unlink()
+
+    def test_stale_technicals_never_fire_a_review(self):
+        rows = [holding("AAA", 50_000, 5.0, gain=10_000)]
+        old = replace(tech("AAA", rsi=90), last_date="2026-10-30")
+        trim = self.review(rows, [snap("2026-11-05")], technicals={"AAA": old})
+        self.assertEqual(trim.triggers, ())
+        self.assertIn("| AAA | 2026-10-30 (stale) |", tr.format_risk_signals(trim, rows))
+        fresh = replace(old, last_date="2026-11-01")
+        self.assertTrue(self.review(rows, [snap("2026-11-05")],
+                                   technicals={"AAA": fresh}).triggers)
+
+    def test_owner_approved_exception_holds_a_binding_limit(self):
+        history = [snap(d, cluster=45.0) for d in days(5)]
+        for until, fires in (("2026-11-05", False), ("2026-11-04", True), ("soon", True)):
+            with self.subTest(until=until):
+                context = {"limit_exceptions": [{
+                    "kind": "SLEEVE", "scope": "direct_ai_semi", "approved_until": until,
+                    "note": "owner accepts until earnings",
+                }]}
+                trim = self.review([], history, cluster_mv=450_000.0, context=context)
+                self.assertEqual(bool(trim.triggers), fires)
+                text = tr.format_rule_triggers(trim)
+                self.assertEqual("owner-approved exception until 2026-11-05" in text, not fires)
 
     def test_rules_off_without_trim_rules(self):
         set_active_policy(replace(active_policy(), trim_rules=None))
@@ -235,13 +266,13 @@ class FormatTests(TrimRuleTestCase):
         trim = self.review(rows, [snap("2026-11-05", AAA=100)], technicals=technicals)
         text = tr.format_risk_signals(trim, rows)
         self.assertIn("- **SPY:** +0.0% vs 50-day, +8.0% vs 200-day, RSI 50", text)
-        self.assertIn("| AAA | +12.0% | +0.0% | 72 |", text)
+        self.assertIn("| AAA | 2026-11-04 | +12.0% | +0.0% | 72 |", text)
         self.assertNotIn("Tracked high", text)
 
     def test_snapshot_fallback_and_missing_note(self):
         rows = [holding("AAA", 50_000, 5.0)]
         history = [snap("2026-10-01", AAA=100), snap("2026-11-05", AAA=80)]
-        trim = tr.review(rows, [], 1e6, 0.0, history, AS_OF, self.root, {},
+        trim = tr.review(rows, [], 1e6, 0.0, history, AS_OF, None, {},
                          ["TIINGO_API_KEY is not set in .env"])
         text = tr.format_risk_signals(trim, rows)
         self.assertIn("Technicals missing: TIINGO_API_KEY is not set in .env.", text)
@@ -281,6 +312,17 @@ class SellOrderTests(TrimRuleTestCase):
         self.assertEqual(plan[-1].term, "ST")
         self.assertAlmostEqual(plan[-1].tax, 10 * 0.333)
 
+    def test_unknown_basis_stays_unknown(self):
+        results = [account("Brokerage (…1111)", "taxable", position("AAA", 10, 100.0, [
+            lot(5, 400.0, "2024-01-02T12:00:00-05:00"),
+            lot(5, 0.0, "2024-02-02T12:00:00-05:00"),
+        ]))]
+        legs = tuple(tr.candidate_legs(results, ["AAA"], AS_OF, active_policy().trim_rules))
+        text = tr._tax_text(legs)
+        self.assertIn("plus unknown tax on $500 with no cost basis", text)
+        self.assertNotIn("break-even", text)
+        self.assertEqual(tr._tax_text(legs[:1]), "est. tax +$24 (break-even drop 4.9%)")
+
     def test_break_even_drop_in_the_block(self):
         rows = [holding("AAA", 4_000, 25.0)]
         trim = self.review(rows, [snap("2026-11-05", AAA=100)], self.results(), total=16_000)
@@ -305,6 +347,10 @@ class RankingTests(TrimRuleTestCase):
         )
         self.assertEqual(set(policy.material_symbols), {"BIG", "HOT"})
         self.assertIn("LOSS", policy.monitor_symbols)
+
+
+SOURCE = [{"url": "https://example.com/release", "date": "2026-09-17"}]
+REASON = "Raised guidance on 2026-09-17 lifts near-term cash flow."
 
 
 class RuleResponseImportTests(unittest.TestCase):
@@ -333,67 +379,84 @@ class RuleResponseImportTests(unittest.TestCase):
             payload["market_regime"] = regime
         return "```json\n" + json.dumps(payload) + "\n```\n"
 
+    def errors(self, *args, **kwargs):
+        checks, _parsed, _computed = self.validate(self.reply(*args, **kwargs))
+        return self.codes(checks, "ERROR"), self.codes(checks, "WARN")
+
     def test_no_triggers_keeps_old_behavior(self):
         checks, _parsed, _computed = self.validate(self.reply())
         self.assertEqual(self.codes(checks), [])
 
     def test_keep_without_a_response_is_rejected(self):
         self.fire()
-        checks, _parsed, _computed = self.validate(self.reply())
-        self.assertIn("rule_response_missing", self.codes(checks, "ERROR"))
+        self.assertIn("rule_response_missing", self.errors()[0])
 
-    def test_comply_must_sell_the_minimum(self):
-        self.fire()
+    def test_comply_is_checked_on_net_exposure(self):
         comply = [{"rule": "R1", "response": "COMPLY"}]
-        checks, _p, _c = self.validate(self.reply([tir.sell(quantity=2)], comply))
-        self.assertIn("rule_trim_too_small", self.codes(checks, "ERROR"))
-        checks, _p, _c = self.validate(self.reply([tir.sell(quantity=3)], comply))
-        self.assertNotIn("rule_trim_too_small", self.codes(checks))
+        for minimum, trades, ok in (
+            (300.0, [tir.sell(quantity=3)], True),
+            (300.9, [tir.sell(quantity=3)], True),
+            (302.0, [tir.sell(quantity=3)], False),
+            (250.0, [tir.sell(quantity=3), tir.buy(ticker="AAA", quantity=3)], False),
+            (250.0, [tir.sell(quantity=3), tir.buy(ticker="BBB", quantity=3)], True),
+        ):
+            with self.subTest(minimum=minimum, trades=len(trades)):
+                self.fire(min_sell=minimum)
+                errors, _warns = self.errors(trades, comply)
+                self.assertEqual("rule_trim_too_small" not in errors, ok)
 
-    def test_review_answers_are_trim_or_dated_hold(self):
+    def test_exception_needs_evidence_and_stays_unresolved(self):
+        self.fire()
+        for item, code in (
+            ({"reason": "thesis intact"}, "rule_reason_incomplete"),
+            ({"reason": REASON}, "rule_reason_incomplete"),
+            ({"reason": REASON, "sources": [{"url": "example.com", "date": "2026-09-17"}]},
+             "rule_reason_incomplete"),
+            ({"reason": REASON, "sources": [{"url": "https://x.com", "date": "2026-02-30"}]},
+             "rule_reason_incomplete"),
+            ({"reason": REASON, "sources": [{"url": "https://x.com", "date": "2026-12-01"}]},
+             "rule_reason_incomplete"),
+        ):
+            with self.subTest(item=item):
+                errors, _warns = self.errors([], [{"rule": "R1", "response": "EXCEPTION", **item}])
+                self.assertIn(code, errors)
+        good = [{"rule": "r1", "response": "exception", "reason": REASON, "sources": SOURCE}]
+        errors, warns = self.errors([], good)
+        self.assertEqual(errors, [])
+        self.assertIn("binding_limit_unresolved", warns)
+        errors, _warns = self.errors([], [{"rule": "R1", "response": "OVERRIDE",
+                                           "reason": REASON, "sources": SOURCE}])
+        self.assertIn("rule_response_invalid", errors)
+
+    def test_review_answers_are_trim_or_supported_hold(self):
         self.fire(min_sell=0.0, kind="STRETCHED")
         trim = [{"rule": "R1", "response": "TRIM"}]
-        checks, _p, _c = self.validate(self.reply([], trim))
-        self.assertIn("rule_trim_too_small", self.codes(checks, "ERROR"))
-        checks, _p, _c = self.validate(self.reply([tir.sell(quantity=1)], trim))
-        self.assertEqual(self.codes(checks, "ERROR"), [])
-        hold = [{"rule": "R1", "response": "HOLD", "reason": "momentum"}]
-        checks, _p, _c = self.validate(self.reply([], hold))
-        self.assertIn("rule_override_undated", self.codes(checks, "ERROR"))
-        hold[0]["reason"] = "2026-09-17 raised guidance, company release"
-        checks, _p, _c = self.validate(self.reply([], hold))
-        self.assertEqual(self.codes(checks, "ERROR"), [])
+        self.assertIn("rule_trim_too_small", self.errors([], trim)[0])
+        self.assertEqual(self.errors([tir.sell(quantity=1)], trim)[0], [])
+        thin = [{"rule": "R1", "response": "HOLD", "reason": "momentum"}]
+        self.assertIn("rule_reason_incomplete", self.errors([], thin)[0])
+        hold = [{"rule": "R1", "response": "HOLD", "reason": REASON, "sources": SOURCE}]
+        self.assertEqual(self.errors([], hold)[0], [])
         comply = [{"rule": "R1", "response": "COMPLY"}]
-        checks, _p, _c = self.validate(self.reply([tir.sell(quantity=1)], comply))
-        self.assertIn("rule_response_invalid", self.codes(checks, "ERROR"))
-
-    def test_market_regime_required_when_asked(self):
-        self.fire(kind=None, regime_required=True)
-        checks, _p, _c = self.validate(self.reply())
-        self.assertIn("market_regime_missing", self.codes(checks, "ERROR"))
-        checks, _p, _c = self.validate(self.reply(regime={"regime": "SIDEWAYS"}))
-        self.assertIn("market_regime_missing", self.codes(checks, "ERROR"))
-        checks, _p, _c = self.validate(self.reply(regime={"regime": "neutral"}))
-        self.assertEqual(self.codes(checks), [])
-        checks, _p, _c = self.validate(self.reply(regime={"regime": "RISK_OFF"}))
-        self.assertIn("risk_off_without_sleeve_sale", self.codes(checks, "WARN"))
-
-    def test_override_needs_a_dated_reason(self):
-        self.fire()
-        undated = [{"rule": "R1", "response": "OVERRIDE", "reason": "thesis intact"}]
-        checks, _p, _c = self.validate(self.reply([], undated))
-        self.assertIn("rule_override_undated", self.codes(checks, "ERROR"))
-        dated = [{"rule": "r1", "response": "override",
-                  "reason": "2026-09-17 guidance raise, company release"}]
-        checks, _p, _c = self.validate(self.reply([], dated))
-        self.assertEqual(self.codes(checks, "ERROR"), [])
+        self.assertIn("rule_response_invalid", self.errors([tir.sell(quantity=1)], comply)[0])
 
     def test_invalid_and_unknown_responses(self):
         self.fire()
         bad = [{"rule": "R1", "response": "HOLD"}, {"rule": "R9", "response": "COMPLY"}]
-        checks, _p, _c = self.validate(self.reply([], bad))
-        self.assertIn("rule_response_invalid", self.codes(checks, "ERROR"))
-        self.assertIn("rule_response_unknown", self.codes(checks, "WARN"))
+        errors, warns = self.errors([], bad)
+        self.assertIn("rule_response_invalid", errors)
+        self.assertIn("rule_response_unknown", warns)
+
+    def test_market_regime_needs_a_label_and_evidence(self):
+        self.fire(kind=None, regime_required=True)
+        self.assertIn("market_regime_missing", self.errors()[0])
+        self.assertIn("market_regime_missing", self.errors(regime={"regime": "SIDEWAYS"})[0])
+        self.assertIn("market_regime_unsupported", self.errors(regime={"regime": "NEUTRAL"})[0])
+        regime = {"regime": "neutral", "reason": REASON, "sources": SOURCE}
+        self.assertEqual(self.errors(regime=regime), ([], []))
+        errors, warns = self.errors(regime=regime | {"regime": "RISK_OFF"})
+        self.assertEqual(errors, [])
+        self.assertIn("risk_off_without_sleeve_sale", warns)
 
     def test_no_research_defers_rules_with_a_warning(self):
         self.fire()
@@ -404,16 +467,29 @@ class RuleResponseImportTests(unittest.TestCase):
         self.assertEqual(self.codes(checks, "ERROR"), [])
         self.assertIn("rule_responses_deferred", self.codes(checks, "WARN"))
 
-    def test_override_reason_reaches_the_decision_history(self):
+    def test_answers_reach_the_decision_history_with_kind_and_scope(self):
         parsed = {"names": [], "rule_responses": [
-            {"rule": "R1", "response": "OVERRIDE", "reason": "2026-09-17 contract signed"}
+            {"rule": "R1", "response": "EXCEPTION", "reason": REASON, "sources": SOURCE},
+            {"rule": "R2", "response": "HOLD", "reason": REASON, "sources": SOURCE},
         ]}
-        tir.imp.record_accepted_response(
-            self.context, parsed, {"briefing_id": "b", "as_of": "2026-09-18"}, "claude", "h"
-        )
+        meta = {"briefing_id": "b", "as_of": "2026-09-18", "rule_triggers": [
+            {"rule_id": "R1", "kind": "SLEEVE", "scope": "direct_ai_semi"},
+            {"rule_id": "R2", "kind": "STRETCHED", "scope": "AAA"},
+        ]}
+        tir.imp.record_accepted_response(self.context, parsed, meta, "claude", "h")
         entry = json.loads(self.context.read_text(encoding="utf-8"))["decision_history"][-1]
-        self.assertIn("R1 OVERRIDE", entry["portfolio_action"])
-        self.assertIn("2026-09-17 contract signed", entry["rationale"])
+        self.assertIn("R1 EXCEPTION REQUESTED (limit unresolved)", entry["portfolio_action"])
+        self.assertIn("R2 HOLD", entry["portfolio_action"])
+        self.assertIn(REASON, entry["rationale"])
+        self.assertEqual(
+            [(a["kind"], a["scope"], a["response"]) for a in entry["rule_answers"]],
+            [("SLEEVE", "direct_ai_semi", "EXCEPTION"), ("STRETCHED", "AAA", "HOLD")],
+        )
+        self.assertEqual(
+            tr.answered_reviews(json.loads(self.context.read_text(encoding="utf-8")),
+                                "2026-09-20"),
+            {("SLEEVE", "direct_ai_semi"): "2026-09-18", ("STRETCHED", "AAA"): "2026-09-18"},
+        )
 
 
 if __name__ == "__main__":

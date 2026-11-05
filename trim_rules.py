@@ -1,9 +1,11 @@
 """Owner trim rules and reviews for the daily briefing.
 
-Two hard limits are binding: the reply must COMPLY (sell at least the minimum)
-or OVERRIDE with a dated reason. Concentration above the rebalance target and
-stretched technicals are required reviews: the reply must TRIM or HOLD with a
-dated reason, and the model sizes any trim. import_response.py checks the answers.
+Two hard limits are binding: the reply must COMPLY (cut net exposure by at least
+the minimum) or request an EXCEPTION, which stays unresolved until the owner
+approves it in portfolio_context.json ``limit_exceptions``. Concentration above
+the rebalance target and stretched technicals are required reviews: the reply
+must TRIM or HOLD, and the model sizes any trim. A review rests for
+``repeat_days`` only after an accepted answer. import_response.py checks the answers.
 Portfolio history comes from the saved ``briefings/weights_YYYY-MM-DD.json`` snapshots.
 """
 
@@ -18,11 +20,10 @@ from pathlib import Path
 
 from briefing_formatting import fmt_money, fmt_qty, fmt_weight
 from get_portfolio import account_tail, fmt_signed_money, is_cash_symbol, term_from_lot
-from market_data import MARKET_SYMBOLS, Technicals
+from market_data import MARKET_SYMBOLS, MAX_CLOSE_AGE_DAYS, Technicals, is_stale
 from portfolio_policy import TrimRules, active_policy
 
 _DATED_WEIGHTS = re.compile(r"^weights_(\d{4}-\d{2}-\d{2})\.json$")
-_DATED_BRIEFING = re.compile(r"^briefing_(\d{4}-\d{2}-\d{2})\.json$")
 # A one-step price move past 60% (or 1/0.6) with market value within 80% (or 1/0.8)
 # is a split or reverse split, not a crash or a rally.
 SPLIT_PRICE_RATIO = 0.6
@@ -282,29 +283,46 @@ def sell_plan(legs: list[Leg], min_sell: float) -> list[Leg]:
     return plan
 
 
-def _prior_firings(briefings_dir: Path, today: str) -> dict[tuple[str, str], str]:
-    """Latest earlier date each (kind, scope) fired, from saved briefing sidecars."""
+def answered_reviews(context: dict | None, today: str) -> dict[tuple[str, str], str]:
+    """Latest date before today with an accepted answer for each (kind, scope).
+
+    Only replies that import_response.py accepted reach the decision history, so a
+    review that was never answered, or answered in a rejected reply, stays active.
+    """
     found: dict[tuple[str, str], str] = {}
-    for path in briefings_dir.glob("briefing_20*.json"):
-        match = _DATED_BRIEFING.match(path.name)
-        if not match or match.group(1) >= today:
+    for entry in (context or {}).get("decision_history") or []:
+        if not isinstance(entry, dict):
             continue
-        try:
-            meta = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+        as_of = str(entry.get("as_of") or "")[:10]
+        if not as_of or as_of >= today:
             continue
-        for row in (meta.get("rule_triggers") or []) if isinstance(meta, dict) else []:
-            if not isinstance(row, dict):
-                continue
-            key = (str(row.get("kind")), str(row.get("scope")))
-            found[key] = max(found.get(key, ""), match.group(1))
+        for answer in entry.get("rule_answers") or []:
+            if isinstance(answer, dict) and answer.get("kind"):
+                key = (str(answer["kind"]), str(answer.get("scope")))
+                found[key] = max(found.get(key, ""), as_of)
     return found
 
 
-def _recent(fired_on: str | None, today: str, repeat_days: int) -> bool:
-    if not fired_on:
+def approved_exceptions(context: dict | None, today: str) -> dict[tuple[str, str], dict]:
+    """Owner-approved exceptions to binding limits that are still in force today."""
+    found = {}
+    for row in (context or {}).get("limit_exceptions") or []:
+        if not isinstance(row, dict):
+            continue
+        until = str(row.get("approved_until") or "")
+        try:
+            date.fromisoformat(until)
+        except ValueError:
+            continue
+        if until >= today:
+            found[(str(row.get("kind")), str(row.get("scope")))] = row
+    return found
+
+
+def _recent(answered_on: str | None, today: str, repeat_days: int) -> bool:
+    if not answered_on:
         return False
-    return (date.fromisoformat(today) - date.fromisoformat(fired_on)).days < repeat_days
+    return (date.fromisoformat(today) - date.fromisoformat(answered_on)).days < repeat_days
 
 
 def stretch_hits(tech: Technicals, rules: TrimRules) -> list[str]:
@@ -325,9 +343,11 @@ class TrimReview:
     sleeve_streak: int
     technicals: dict[str, Technicals]
     technicals_problems: tuple[str, ...]
+    today: date
     triggers: tuple[RuleTrigger, ...]
     plans: dict[str, tuple[Leg, ...]]
     tax_free: dict[str, tuple[Leg, ...]]
+    exception_notes: tuple[str, ...] = ()
 
 
 def review(
@@ -337,7 +357,7 @@ def review(
     cluster_mv: float,
     history: list[dict],
     as_of: datetime,
-    briefings_dir: Path,
+    context: dict | None = None,
     technicals: dict[str, Technicals] | None = None,
     technicals_problems=(),
 ) -> TrimReview:
@@ -350,25 +370,38 @@ def review(
         sleeve_streak=sleeve_breach_streak(history, policy.cluster_soft_cap_pct),
         technicals=technicals,
         technicals_problems=tuple(technicals_problems),
+        today=as_of.date(),
     )
     if rules is None or grand_total <= 0:
         return TrimReview(**base, triggers=(), plans={}, tax_free={})
 
     today = as_of.strftime("%Y-%m-%d")
-    prior = _prior_firings(briefings_dir, today)
+    answered = answered_reviews(context, today)
+    exceptions = approved_exceptions(context, today)
+    notes: list[str] = []
     found: list[tuple[str, str, tuple[str, ...], float, float, str]] = []
+
+    def binding(kind, scope, symbols, cut, detail):
+        approved = exceptions.get((kind, scope))
+        if approved is None:
+            found.append((kind, scope, symbols, cut, cut, detail))
+            return
+        notes.append(
+            f"- {kind} ({scope}): owner-approved exception until "
+            f"{approved['approved_until']}. {approved.get('note') or ''}".rstrip()
+        )
 
     streak = base["sleeve_streak"]
     cut = max(0.0, cluster_mv - grand_total * policy.cluster_soft_cap_pct / 100)
     if streak >= rules.sleeve_breach_enforce_days and cut > 0:
         members = tuple(policy.sleeves[SLEEVE])
-        found.append((
-            "SLEEVE", SLEEVE, members, cut, cut,
+        binding(
+            "SLEEVE", SLEEVE, members, cut,
             f"direct AI/semi {fmt_weight(cluster_mv / grand_total * 100)} has been above the "
             f"{policy.cluster_soft_cap_pct:g}% ceiling for {streak} snapshots in a row "
             f"(rule: {rules.sleeve_breach_enforce_days}). Sell at least **{fmt_money(cut)}** "
             f"across {'+'.join(members)} to reach {policy.cluster_soft_cap_pct:g}%.",
-        ))
+        )
 
     index_funds = set(policy.sleeves["broad_index"])
     target = rules.rebalance_target_pct
@@ -378,13 +411,13 @@ def review(
             continue
         excess = h["market_value"] - grand_total * target / 100
         if h["weight"] > rules.single_name_hard_cap_pct:
-            found.append((
-                "HARD_CAP", symbol, (symbol,), excess, excess,
+            binding(
+                "HARD_CAP", symbol, (symbol,), excess,
                 f"{symbol} is {fmt_weight(h['weight'])}, above the "
                 f"{rules.single_name_hard_cap_pct:g}% hard cap. Sell at least "
                 f"**{fmt_money(excess)}** to return to {target:g}%.",
-            ))
-        elif excess > 0 and not _recent(prior.get(("REBALANCE", symbol)), today,
+            )
+        elif excess > 0 and not _recent(answered.get(("REBALANCE", symbol)), today,
                                         rules.repeat_days):
             found.append((
                 "REBALANCE", symbol, (symbol,), 0.0, excess,
@@ -393,12 +426,12 @@ def review(
                 "TRIM (you size it) or HOLD.",
             ))
         tech = technicals.get(symbol)
-        hits = stretch_hits(tech, rules) if tech else []
+        hits = stretch_hits(tech, rules) if tech and not is_stale(tech, as_of.date()) else []
         if (
             hits
             and (h.get("total_gain") or 0) > 0
             and h["market_value"] >= policy.analyze_market_value_floor
-            and not _recent(prior.get(("STRETCHED", symbol)), today, rules.repeat_days)
+            and not _recent(answered.get(("STRETCHED", symbol)), today, rules.repeat_days)
         ):
             found.append((
                 "STRETCHED", symbol, (symbol,), 0.0, 0.0,
@@ -413,7 +446,10 @@ def review(
         legs = candidate_legs(results, symbols, as_of, rules)
         plans[trigger.rule_id] = tuple(sell_plan(legs, amount) if amount > 0 else legs)
         tax_free[trigger.rule_id] = tuple(leg for leg in legs if leg.tax_bucket != "taxable")
-    return TrimReview(**base, triggers=tuple(triggers), plans=plans, tax_free=tax_free)
+    return TrimReview(
+        **base, triggers=tuple(triggers), plans=plans, tax_free=tax_free,
+        exception_notes=tuple(notes),
+    )
 
 
 def _pct(value: float | None) -> str:
@@ -446,10 +482,12 @@ def format_risk_signals(trim: TrimReview, holdings: list[dict]) -> str:
             f"- Direct AI/semi has been above {policy.cluster_soft_cap_pct:g}% for "
             f"{trim.sleeve_streak} snapshots in a row."
         )
+    today = trim.today
     for symbol in MARKET_SYMBOLS:
         tech = trim.technicals.get(symbol)
         if tech:
-            lines.append(f"- **{symbol}:** {_tech_text(tech)}.")
+            stale = " **Stale.**" if is_stale(tech, today) else ""
+            lines.append(f"- **{symbol}:** {_tech_text(tech)}.{stale}")
     if trim.technicals_problems:
         lines.append("- Technicals missing: " + "; ".join(trim.technicals_problems) + ".")
 
@@ -463,11 +501,16 @@ def format_risk_signals(trim: TrimReview, holdings: list[dict]) -> str:
         techs.sort(key=lambda t: (-(t.vs_sma50 or -999), t.symbol))
         lines += [
             "",
-            "| Ticker | vs 50-day | vs 200-day | RSI(14) | From 52w high | 1-month | 3-month |",
-            "|---|---:|---:|---:|---:|---:|---:|",
+            "Stale rows (last close more than "
+            f"{MAX_CLOSE_AGE_DAYS} days old) are context only and do not trigger reviews.",
+            "",
+            "| Ticker | Close | vs 50-day | vs 200-day | RSI(14) | From 52w high | 1-month "
+            "| 3-month |",
+            "|---|---|---:|---:|---:|---:|---:|---:|",
         ]
         lines.extend(
-            f"| {t.symbol} | {_pct(t.vs_sma50)} | {_pct(t.vs_sma200)} | "
+            f"| {t.symbol} | {t.last_date}{' (stale)' if is_stale(t, today) else ''} | "
+            f"{_pct(t.vs_sma50)} | {_pct(t.vs_sma200)} | "
             f"{'—' if t.rsi14 is None else f'{t.rsi14:.0f}'} | {_pct(t.from_52w_high)} | "
             f"{_pct(t.ret_1m)} | {_pct(t.ret_3m)} |"
             for t in techs
@@ -509,8 +552,15 @@ def _leg_text(leg: Leg) -> str:
 
 
 def _tax_text(legs: tuple[Leg, ...]) -> str:
+    """Estimated tax, with any shares lacking a cost basis kept visibly unknown."""
     sold = sum(leg.value for leg in legs)
-    tax = sum(leg.tax or 0.0 for leg in legs)
+    tax = sum(leg.tax for leg in legs if leg.tax is not None)
+    unknown = sum(leg.value for leg in legs if leg.tax is None)
+    if unknown:
+        return (
+            f"est. tax {fmt_signed_money(tax)} on shares with a known basis, plus unknown tax "
+            f"on {fmt_money(unknown)} with no cost basis"
+        )
     breakeven = f" (break-even drop {tax / sold * 100:.1f}%)" if sold and tax > 0 else ""
     return f"est. tax {fmt_signed_money(tax)}{breakeven}"
 
@@ -520,10 +570,10 @@ def format_rule_triggers(trim: TrimReview) -> str:
     if rules is None:
         return "- Trim rules are off (no `trim_rules` in portfolio_policy.json)."
     if not trim.triggers:
-        return "- No rule or review fired today."
-    lines = []
+        return "\n".join(trim.exception_notes) or "- No rule or review fired today."
+    lines = list(trim.exception_notes)
     for trigger in trim.triggers:
-        answer = "binding: COMPLY or OVERRIDE" if trigger.binding else "review: TRIM or HOLD"
+        answer = "binding: COMPLY or EXCEPTION" if trigger.binding else "review: TRIM or HOLD"
         lines.append(f"- **{trigger.rule_id} {trigger.kind}** ({answer}): {trigger.detail}")
         plan = trim.plans.get(trigger.rule_id) or ()
         if not plan:

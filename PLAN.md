@@ -28,15 +28,18 @@ Done when:
 
 ### 2. Rules and reviews
 
-Binding, answered with COMPLY (sell at least the minimum) or OVERRIDE (with a dated reason):
+Binding, answered with COMPLY (cut net exposure by at least the minimum after all trades) or EXCEPTION. The model can only request an exception. The limit stays unresolved, and fires daily, until the owner adds an entry to `limit_exceptions` in `portfolio_context.json` (`kind`, `scope`, `approved_until`, `note`) or the position is cut:
 - `SLEEVE`: direct AI/semi above its soft ceiling for N consecutive snapshots. The minimum sale brings it back to the ceiling.
 - `HARD_CAP`: a single name above the hard cap. The minimum sale brings it back to the 15% soft limit.
 
-Required reviews, answered with TRIM (any SELL of the name) or HOLD (with a dated reason):
+Required reviews, answered with TRIM (a net sale of the name) or HOLD (why holding beats trimming given concentration, uncertainty, tax and holding period; not a short-term price call):
 - `REBALANCE`: a non-index name above the 15% target. The block shows the dollars to reach it, and the model sizes the trim.
-- `STRETCHED`: a name with a gain whose technicals hit a stretch threshold (RSI, or distance above the 50- or 200-day average). It repeats only after `repeat_days`.
+- `STRETCHED`: a name with a gain whose technicals hit a stretch threshold (RSI, or distance above the 50- or 200-day average). Technicals with a last close more than 4 days old are shown with their date as context and never fire it.
+- A review rests for `repeat_days` only after an accepted reply answered it. An unanswered or rejected review fires again the next day.
 
-Each item lists untaxed IRA/Roth shares first, then taxable lots by tax per dollar, with the estimated tax and the break-even drop. Items rank first in focus.
+EXCEPTION, HOLD and the market regime each need a reason, plus a source with an http(s) URL and a real date on or before the data date.
+
+Each item lists untaxed IRA/Roth shares first, then taxable lots by tax per dollar, with the estimated tax and the break-even drop. Shares with no cost basis show as unknown tax, and the break-even drop is left out. Items rank first in focus.
 
 Done when:
 - Tests cover each item firing and not firing, the repeat window, index exemption, sell order and tax math, and focus ranking.
@@ -51,16 +54,17 @@ Done when:
 
 ### 4. Import checks
 
-`import_response.py` checks each item's answer against the proposal's SELL trades and records OVERRIDE and HOLD reasons in the decision history.
+`import_response.py` checks each COMPLY and TRIM against net exposure after all proposed trades, with a $1 rounding allowance. It records each answer's kind and scope, and the EXCEPTION and HOLD reasons, in the decision history.
 
 Done when:
-- Import tests cover missing answers, undersized COMPLY, TRIM with no sale, undated OVERRIDE or HOLD, and briefings with no saved items (unchanged behavior).
+- Import tests cover missing answers, a sale bought back in the same proposal, the rounding allowance, TRIM with no net sale, EXCEPTION and HOLD without full evidence, and briefings with no saved items (unchanged behavior).
 
 ## Status
 
 - 2026-11-02: one-window `daily.cmd`, offline build removed, docs updated (PRs #6 to #8).
 - 2026-11-05: first version of the rules built on `feat/trim-rules` (mechanical drawdown and gain trims). The owner redirected the design the same day, and items 1 to 4 replace that version.
 - 2026-11-05: items 1 to 4 built on `feat/trim-rules`. 273 tests pass and ruff is clean. A replay of a saved snapshot fires the sleeve rule and a rebalance review as expected. STRETCHED is unverified against live Tiingo data until a key is set.
+- 2026-11-05: review fixes on PR #9: net-exposure compliance, cooldown after an accepted answer, stale technicals kept out of reviews, unknown tax kept unknown, owner-approved exceptions, a balanced HOLD, and evidence checks. 276 tests pass.
 - The repo is public. Keep portfolio values, weights and dollar amounts out of this file, commits and PR text.
 
 ## Next

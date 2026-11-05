@@ -1258,7 +1258,7 @@ def build_briefing(
         cluster_mv,
         load_snapshot_history(BRIEFINGS_DIR, today_snap),
         as_of,
-        BRIEFINGS_DIR,
+        context,
         technicals,
         technicals_problems,
     )

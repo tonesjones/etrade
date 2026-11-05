@@ -23,6 +23,8 @@ MARKET_SYMBOLS = ("SPY", "QQQ", "SMH")
 HISTORY_DAYS = 400
 TIMEOUT_SECONDS = 15
 TRADING_DAYS_YEAR = 252
+# Covers a weekend plus a market holiday; an older close is stale.
+MAX_CLOSE_AGE_DAYS = 4
 
 
 @dataclass(frozen=True)
@@ -36,6 +38,15 @@ class Technicals:
     from_52w_high: float
     ret_1m: float | None
     ret_3m: float | None
+
+
+def is_stale(t: Technicals, today: date) -> bool:
+    """True when the last close is too old to trigger a review today."""
+    try:
+        closed = date.fromisoformat(t.last_date)
+    except ValueError:
+        return True
+    return (today - closed).days > MAX_CLOSE_AGE_DAYS
 
 
 def _pct(a: float, b: float) -> float:
