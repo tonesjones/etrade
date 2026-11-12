@@ -34,6 +34,7 @@ from briefing_snapshots import (  # noqa: F401 - re-exported for callers and tes
     save_weights_snapshot,
     snapshot_dict,
 )
+from execution_tracking import execution_detail, reconcile_context_file
 from get_portfolio import (
     PORTABLE_BEGIN,
     AuthExpiredError,
@@ -47,6 +48,7 @@ from get_portfolio import (
     fmt_signed_money,
     fmt_signed_pct,
     format_portable_portfolio_text,
+    get_accounts_api,
     is_cash_symbol,
     long_term_date,
     lot_term_conflict,
@@ -348,6 +350,10 @@ def format_decision_history(context: dict) -> str:
     for item in history[-12:]:
         if not isinstance(item, dict):
             continue
+        approval = item.get("approval_state") or "NOT RECORDED"
+        detail = execution_detail(item)
+        if detail:
+            approval = f"{approval}: {detail}"
         rows.append(
             "| {date} | {scope} | {action} | {basis} | {rationale} | {trigger} | {approval} |".format(
                 date=item.get("as_of") or "UNKNOWN",
@@ -356,7 +362,7 @@ def format_decision_history(context: dict) -> str:
                 basis=item.get("decision_basis") or "UNKNOWN",
                 rationale=item.get("rationale") or "UNKNOWN",
                 trigger=item.get("decision_trigger") or "UNKNOWN",
-                approval=item.get("approval_state") or "NOT RECORDED",
+                approval=approval,
             )
         )
     if not rows:
@@ -1307,7 +1313,11 @@ def build_briefing(
         "UNCHANGED / MODIFIED / REVERSED / RESOLVED. MODIFIED or REVERSED needs a dated new fact "
         "that invalidates an earlier assumption, a fired rule trigger, or a price move past an earlier "
         "trigger; a fresh look or a vaguely better outlook is not enough. "
-        "Treat a proposal as executed only when its approval state is EXECUTED CONFIRMED.\n\n"
+        "Treat a proposal as executed when its approval state is EXECUTED CONFIRMED (an E*TRADE "
+        "transaction matched it). EXECUTED (INFERRED FROM POSITIONS) means the shares changed by "
+        "the proposed amount with no matching transaction; treat it as likely executed. "
+        "PARTIALLY EXECUTED means only part was traded; SUPERSEDED means a newer proposal replaced "
+        "it. Anything else was not executed.\n\n"
         if has_decision_history(context)
         else ""
     )
@@ -1483,6 +1493,22 @@ def main(argv=None) -> int:
         return 2
 
 
+def report_executions(results, as_of: datetime) -> None:
+    """Mark recorded proposals the owner traded, before the prompt reads the history."""
+    accounts_api, _creds = get_accounts_api()
+    try:
+        lines, problems = reconcile_context_file(
+            CONTEXT_PATH, results, as_of, BRIEFINGS_DIR, accounts_api
+        )
+    except (OSError, ValueError) as exc:
+        print(f"Execution check skipped: {exc}", file=sys.stderr)
+        return
+    for problem in problems:
+        print(f"Transactions unavailable, using position changes only: {problem}")
+    for line in lines:
+        print(f"Proposal update: {line}")
+
+
 def _run(args) -> int:
     print("Fetching live E*TRADE portfolio...")
     formatted, grand_total, npos, results, as_of = fetch_portfolio_block(
@@ -1493,6 +1519,7 @@ def _run(args) -> int:
         # against exact accounts and lots.
         formatted = format_portable_portfolio_text(formatted, results, as_of)
 
+    report_executions(results, as_of)
     holdings, accounts = consolidate(results, grand_total)
     result = build_briefing(
         holdings, accounts, grand_total, as_of, formatted, results=results,
