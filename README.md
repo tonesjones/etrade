@@ -169,7 +169,23 @@ The prompt includes two deltas against the previous pull:
 - The portfolio delta shows weight moves of 0.5 percentage points or more, sleeve weights, and breaches of the 15% single-name cap.
 - The account delta compares per-account quantities and lot identity. It reports a position that appeared or disappeared, a quantity that rose or fell, a lot that changed, or no change.
 
-The account delta shows that holdings changed. It doesn't prove a buy or a sale, because transfers, splits, and other corporate actions also change positions. It also doesn't show why a holding changed, or whether you acted on a model's proposal. The prompt marks earlier proposals `NOT CAPTURED` unless your decision history records them.
+The account delta shows that holdings changed. It doesn't prove a buy or a sale, because transfers, splits, and other corporate actions also change positions. It also doesn't show why a holding changed. The prompt marks earlier proposals `NOT CAPTURED` unless your decision history records them.
+
+### Track which proposals you traded
+
+You don't record your trades by hand. Each live build checks the open proposals in `decision_history` against what happened in the account, then updates `approval_state` before it writes the prompt:
+
+| State | Evidence |
+|---|---|
+| `EXECUTED CONFIRMED` | An E\*TRADE `Sold` or `Bought` transaction in the proposal's account and symbol, dated on or after the proposal, covers the full quantity. |
+| `EXECUTED (INFERRED FROM POSITIONS)` | No matching transaction, but the share count changed by the full quantity since the proposal's briefing. A transfer or a split looks the same. |
+| `PARTIALLY EXECUTED` | Either kind of evidence covers only part of the quantity. |
+| `SUPERSEDED` | A newer proposal covers the same account, symbol, and side. Only the newest one is checked. |
+| `NOT APPROVED / NOT EXECUTED` | No matching change yet. |
+
+The build prints a `Proposal update:` line for each record that changed. Each changed record gets an `execution` block with the quantities, dates, and average price. An inferred or partial record is checked again on later builds, so a transaction that posts late upgrades it. A proposal stops being checked 7 days after its date.
+
+If the transactions request fails, the build uses position changes only and says so. An account that fails to load is skipped, so its proposals stay open. Neither failure stops the build.
 
 A position worth less than `analyze_market_value_floor` on both days doesn't count as a change, so it can't turn a routine day into a decision day. The account delta still lists it.
 
@@ -210,7 +226,7 @@ To give the model context that E\*TRADE can't supply, copy `portfolio_context.ex
 
 - `owner_profile` holds your horizon, cash reserve, withdrawals, tax facts, and hard limits.
 - `research` holds one dated record per held name or recurring candidate: the valuation or entry condition, the decision trigger, metrics, and primary sources.
-- `decision_history` holds earlier proposals and their conditions. Record an approval or an execution only when you have evidence of it. A model's recommendation is not an approval. An `ACCEPTED` import appends its proposals here, marked `NOT APPROVED / NOT EXECUTED`.
+- `decision_history` holds earlier proposals and their conditions. Record an approval or an execution only when you have evidence of it. A model's recommendation is not an approval. An `ACCEPTED` import appends its proposals here, marked `NOT APPROVED / NOT EXECUTED`. The next live build updates them when you trade (see [Track which proposals you traded](#track-which-proposals-you-traded)).
 - `candidate_review_history` records the dates when an imported reply completed a candidate review.
 
 The prompt reports a blank owner profile as "not supplied", and the model flags a missing field only where it would change a trade. Without research notes, the model researches each focus name itself. Update the notes after earnings or a material event.

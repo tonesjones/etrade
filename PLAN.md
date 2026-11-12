@@ -82,6 +82,19 @@ The README doesn't mention Tiingo. Add the free-key step, the `TIINGO_API_KEY` l
 Done when:
 - A new user can set up technicals from the README alone.
 
+### 9. Record which proposals the owner actually traded
+
+An accepted import records the model's trades as `NOT APPROVED / NOT EXECUTED`. Nothing updates that when the owner places the trade, so the next briefing still treats an executed sale as an open suggestion. Each live build now checks the open proposals in `decision_history` against two sources and updates them in `portfolio_context.json`:
+
+- E\*TRADE transactions (read-only Accounts API): a `Sold` or `Bought` transaction in the proposal's account and symbol, dated on or after the proposal. A full match sets `EXECUTED CONFIRMED`.
+- Position changes: the share count in the proposal's account against the observation snapshot saved with the proposal's briefing. A full match with no transaction sets `EXECUTED (INFERRED FROM POSITIONS)`, because a transfer or split looks the same.
+
+Partial fills set `PARTIALLY EXECUTED`. Each record gets an `execution` block with the method, quantities, dates and prices. Only the newest open proposal per account, symbol and side is checked; older ones are marked `SUPERSEDED`. Proposals stop being checked 7 days after their date. A failed transactions fetch or an account that failed to load falls back or is skipped; it never marks a trade executed and never fails the build.
+
+Done when:
+- Tests cover a confirmed sale, a partial fill, a position-only match, no change, a failed account, a failed transactions fetch, supersession and the 7-day cutoff, without network access.
+- The build prints what it matched and the prompt's decision history shows the new state.
+
 ### 8. Cleanup (nice later)
 
 - Delete `tax_bucket_label()` and `format_taxable_cost_table()`. Nothing calls them, not even tests.
@@ -100,6 +113,7 @@ Done when:
 - 2026-11-05: review fixes on PR #9: net-exposure compliance, cooldown after an accepted answer, stale technicals kept out of reviews, unknown tax kept unknown, owner-approved exceptions, a balanced HOLD, and evidence checks. 276 tests pass.
 - 2026-11-05: second review on PR #9: a hard-cap check on buys after all trades, and the cooldown counts only validated answers. 278 tests pass.
 - 2026-11-05: items 5 to 7 built on `fix/review-followups`. 282 tests pass and ruff is clean. Item 8 and the open decisions are still open.
+- 2026-11-12: item 9 built on `feat/execution-tracking`. 301 tests pass and ruff is clean. The transactions request is unverified against the live API until the next daily build.
 - The repo is public. Keep portfolio values, weights and dollar amounts out of this file, commits and PR text.
 
 ## Next
